@@ -141,6 +141,9 @@ private:
     // moves 1% of them: a scan of every galaxy is too slow to repeat each frame.
     void refreshGalaxyDistances(const glm::dvec3& camGal);
     glm::dvec3 galDistAt_{1e300};
+    std::vector<size_t> nearIdx_;         // candidates for the nearest stars (indices into stars_)
+    glm::dvec3 nearAt_{1e300};
+    double nearReach_ = 0.0;              // distance to the eighth nearest at the last full scan
     double galSurfaceM_ = 1e300, galCentreM_ = 1e300;
     std::string status_;
     double jd0_ = 0.0;           // Julian date when the simulation started (real universe)

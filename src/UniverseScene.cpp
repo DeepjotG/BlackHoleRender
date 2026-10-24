@@ -748,20 +748,34 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
         double d;
         size_t i;
     };
-    Near best[8];
-    int nb = 0;
-    for (size_t i = 0; i < stars_.size(); ++i) {
-        const double d = glm::length(stars_[i].pos - camGal);
-        if (nb < 8 || d < best[nb - 1].d) {
-            int k = std::min(nb, 7);
-            while (k > 0 && best[k - 1].d > d) {
-                best[k] = best[k - 1];
-                --k;
+    // The eight nearest stars; the full scan (hundreds of thousands of stars) only runs when the star
+    // set changed or the camera moved a tenth of the way to the eighth one, otherwise the cached
+    // candidates are re-sorted (with 16 candidates kept, the eight nearest stay among them).
+    if (changed || nearIdx_.empty() || glm::length(camGal - nearAt_) > 0.1 * nearReach_) {
+        Near cand[16];
+        int nc = 0;
+        for (size_t i = 0; i < stars_.size(); ++i) {
+            const double d = glm::length(stars_[i].pos - camGal);
+            if (nc < 16 || d < cand[nc - 1].d) {
+                int k = std::min(nc, 15);
+                while (k > 0 && cand[k - 1].d > d) {
+                    cand[k] = cand[k - 1];
+                    --k;
+                }
+                cand[k] = {d, i};
+                nc = std::min(nc + 1, 16);
             }
-            best[k] = {d, i};
-            nb = std::min(nb + 1, 8);
         }
+        nearIdx_.clear();
+        for (int k = 0; k < nc; ++k) nearIdx_.push_back(cand[k].i);
+        nearAt_ = camGal;
+        nearReach_ = nc >= 8 ? cand[7].d : 1e300;
     }
+    Near best[16];
+    int nb = 0;
+    for (size_t i : nearIdx_) best[nb++] = {glm::length(stars_[i].pos - camGal), i};
+    std::sort(best, best + nb, [](const Near& a, const Near& b) { return a.d < b.d; });
+    nb = std::min(nb, 8);
     for (int k = 0; k < nb; ++k) {
         const universe::StarRecord& st = stars_[best[k].i];
         const double rM = st.radiusSolar * units::kSolarRadius / metersPerM_;
