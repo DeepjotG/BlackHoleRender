@@ -463,6 +463,7 @@ void Ui::draw(UiContext& c) {
         ImGui::SliderFloat("Noise scale", &s.diskNoiseScale, 0.25f, 4.0f, "%.2f");
         ImGui::SliderFloat("Noise strength", &s.diskNoiseStrength, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Rotation speed", &s.diskSpeed, 0.0f, 10.0f, "%.2f");
+        if (s.diskSpeed > 0.0f) ImGui::TextDisabled("inner edge goes round every %.1f s", 2.0 * 3.14159265 * std::pow(6.0, 1.5) / (10.0 * s.diskSpeed));
         ImGui::SliderFloat("Warm tint", &s.diskWarmth, 0.0f, 1.0f, "%.2f");
         ImGui::Checkbox("Pause disk (P)", &s.paused);
     }

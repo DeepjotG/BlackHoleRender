@@ -253,6 +253,7 @@ int App::run(const Options& opt) {
     if (opt.placement >= 0) settings_.realPlacement = opt.placement;
     debugView_ = opt.debugView;
     simTime_ = opt.startTime;
+    diskClock_ = std::fmod(opt.startTime * settings_.diskSpeed * 10.0, 60.0);
 
     if (!initWindow()) return 1;
     // First interactive run without the NVIDIA driver: start on Medium so it stays smooth. The
@@ -398,7 +399,13 @@ void App::frame() {
 
     Camera::Input in;
     gatherInput(in);
-    if (!settings_.paused) simTime_ += dt;
+    if (!settings_.paused) {
+        simTime_ += dt;
+        // Disk flow: 10 M of orbital motion per second at speed 1, so the inner edge (period 2 pi 6^1.5 M)
+        // goes round in about 9 s and the outer disk in about a minute.
+        constexpr double kDiskBaseRate = 10.0, kDiskClockPeriod = 60.0;
+        diskClock_ = std::fmod(diskClock_ + static_cast<double>(dt) * settings_.diskSpeed * kDiskBaseRate, kDiskClockPeriod);
+    }
     updateWorld(dt, in);
 
     reloadTimer_ += dt;
@@ -456,7 +463,8 @@ void App::frame() {
     fi.uniTiles = universe_.tileBuffer();
     fi.uniTileGrid = UniverseScene::kTileGrid;
     fi.uniStarScale = settings_.starBrightness * 15.0f;
-    fi.time = static_cast<float>(simTime_);
+    fi.time = static_cast<float>(std::fmod(simTime_, 3600.0));
+    fi.diskTime = static_cast<float>(diskClock_);
     fi.dt = dt;
     fi.windowW = fbW_;
     fi.windowH = fbH_;

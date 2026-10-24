@@ -23,7 +23,8 @@ struct GasVolumeRef {
 struct FrameInput {
     const Camera* camera = nullptr;
     const Settings* settings = nullptr;
-    float time = 0.0f;   // disk animation time (seconds)
+    float time = 0.0f;   // seconds since start (film grain)
+    float diskTime = 0.0f;   // disk flow clock in M, wrapped to the noise cross-fade period
     float dt = 0.0f;
     int windowW = 0, windowH = 0;
     GLuint skyCubemap = 0, noise3d = 0, blackbodyLut = 0;

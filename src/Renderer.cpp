@@ -192,6 +192,7 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     p.set("uCamBasis", cam.basis());
     p.set("uTanHalfFov", tanHalf);
     p.set("uTime", in.time);
+    p.set("uDiskTime", in.diskTime);
     p.set("uLensing", s.lensing ? 1 : 0);
     p.set("uFarMode", in.farMode ? 1 : 0);
     p.set("uUniverse", in.universe ? 1 : 0);
@@ -254,7 +255,6 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     p.set("uDiskBrightness", s.diskBrightness);
     p.set("uDiskNoiseScale", s.diskNoiseScale);
     p.set("uDiskNoiseStrength", s.diskNoiseStrength);
-    p.set("uDiskSpeed", s.diskSpeed);
     p.set("uDiskWarmth", s.diskWarmth);
     p.set("uSkyBrightness", s.skyBrightness);
     p.set("uStarDensity", s.starDensity);
@@ -450,7 +450,7 @@ void Renderer::render(const FrameInput& in) {
     beginTimer();
 
     const bool accumulate = s.accumulate;
-    const int cap = accumulate ? (in.diskAnimating ? std::min(s.maxAccumFrames, 24) : s.maxAccumFrames) : 1;
+    const int cap = accumulate ? (in.diskAnimating ? std::min(s.maxAccumFrames, 6) : s.maxAccumFrames) : 1;
     const int sample = accumulate ? accumCount_ : 0;
     tracePass(in, trace_, accumulate ? jitterFor(sample) : glm::vec2(0.0f), false);
     const Target* hdrInternal = &trace_;

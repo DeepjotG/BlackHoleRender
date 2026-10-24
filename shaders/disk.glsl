@@ -14,7 +14,7 @@ uniform float uDiskPeakTemp;
 uniform float uDiskBrightness;
 uniform float uDiskNoiseScale;
 uniform float uDiskNoiseStrength;
-uniform float uDiskSpeed;
+uniform float uDiskTime;        // flow clock in M (CPU-side: real time x rotation speed x base rate, wrapped)
 uniform float uDiskWarmth;
 
 // Film-style warm grade applied to the disk's blackbody colour.
@@ -44,8 +44,8 @@ float redshiftFactor(float r, float bAxis, float rcam) {
 // copies are cross-faded so differential rotation never shears the pattern indefinitely.
 float diskNoise(float r, float phi, float yOverH) {
     float omega = keplerOmega(r);
-    float t = uTime * uDiskSpeed;
-    const float P = 60.0;
+    float t = uDiskTime;
+    const float P = 60.0;   // must match kDiskClockPeriod in App.cpp
     float t1 = mod(t, P);
     float t2 = mod(t + 0.5 * P, P);
     float w2 = abs(2.0 * t1 / P - 1.0);

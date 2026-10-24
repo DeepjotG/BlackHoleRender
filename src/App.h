@@ -127,6 +127,7 @@ private:
 
     double lastTime_ = 0.0;
     double simTime_ = 0.0;
+    double diskClock_ = 0.0;             // disk flow clock in M, wrapped to the cross-fade period
     double reloadTimer_ = 0.0;
     double skyDirtyFor_ = 0.0;
     int lastDebugView_ = 0;
