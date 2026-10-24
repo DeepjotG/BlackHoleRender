@@ -17,15 +17,15 @@ void Settings::applyPreset(int p) {
             diskMode = DISK_THIN; skyResolution = 2048;
             break;
         case PRESET_MEDIUM:
-            renderScale = 0.67f; maxSteps = 300; stepScale = 0.07f; diskStep = 0.30f;
+            renderScale = 0.75f; maxSteps = 300; stepScale = 0.07f; diskStep = 0.30f;
             diskMode = DISK_VOLUMETRIC; skyResolution = 2048;
             break;
         case PRESET_HIGH:
-            renderScale = 0.85f; maxSteps = 400; stepScale = 0.05f; diskStep = 0.20f;
+            renderScale = 1.0f; maxSteps = 450; stepScale = 0.05f; diskStep = 0.18f;
             diskMode = DISK_VOLUMETRIC; skyResolution = 2048;
             break;
         case PRESET_ULTRA:
-            renderScale = 1.0f; maxSteps = 600; stepScale = 0.035f; diskStep = 0.12f;
+            renderScale = 1.0f; maxSteps = 700; stepScale = 0.035f; diskStep = 0.10f;
             diskMode = DISK_VOLUMETRIC; skyResolution = 4096;
             break;
         default:
@@ -74,7 +74,7 @@ const std::vector<Field>& fields() {
         BHS_FIELD(lensing), BHS_FIELD(dopplerStrength),
         BHS_FIELD(diskInner), BHS_FIELD(diskOuter), BHS_FIELD(diskThickness), BHS_FIELD(diskDensity),
         BHS_FIELD(diskOpacity), BHS_FIELD(diskPeakTemp), BHS_FIELD(diskBrightness), BHS_FIELD(diskNoiseScale),
-        BHS_FIELD(diskNoiseStrength), BHS_FIELD(diskSpeed),
+        BHS_FIELD(diskNoiseStrength), BHS_FIELD(diskSpeed), BHS_FIELD(diskWarmth),
         BHS_FIELD(skySeed), BHS_FIELD(galaxyCount), BHS_FIELD(galaxyBrightness), BHS_FIELD(milkyWayBrightness),
         BHS_FIELD(nebulaBrightness), BHS_FIELD(starDensity), BHS_FIELD(starBrightness), BHS_FIELD(skyBrightness),
         BHS_FIELD(exposure), BHS_FIELD(autoExposure), BHS_FIELD(bloomIntensity), BHS_FIELD(bloomThreshold),

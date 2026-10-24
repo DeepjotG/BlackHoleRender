@@ -12,10 +12,10 @@ enum Preset : int { PRESET_LOW = 0, PRESET_MEDIUM = 1, PRESET_HIGH = 2, PRESET_U
 struct Settings {
     // ---- Quality ----
     int preset = PRESET_HIGH;
-    float renderScale = 0.85f;      // internal resolution / window resolution
-    int maxSteps = 400;             // geodesic integration step cap per ray
+    float renderScale = 1.0f;       // internal resolution / window resolution
+    int maxSteps = 450;             // geodesic integration step cap per ray
     float stepScale = 0.05f;        // base step length = stepScale * r
-    float diskStep = 0.20f;         // step length inside the disk slab
+    float diskStep = 0.18f;         // step length inside the disk slab
     int diskMode = DISK_VOLUMETRIC;
     int skyResolution = 2048;       // baked cubemap face size
     bool dynamicResolution = false;
@@ -33,12 +33,13 @@ struct Settings {
     float diskOuter = 20.0f;
     float diskThickness = 0.035f;   // scale height H/r
     float diskDensity = 1.0f;
-    float diskOpacity = 3.0f;
-    float diskPeakTemp = 6200.0f;   // Kelvin at the hottest ring
-    float diskBrightness = 5.0f;
+    float diskOpacity = 2.0f;
+    float diskPeakTemp = 6000.0f;   // Kelvin at the hottest ring
+    float diskBrightness = 4.5f;
     float diskNoiseScale = 1.0f;
     float diskNoiseStrength = 0.85f;
     float diskSpeed = 1.0f;         // disk time multiplier
+    float diskWarmth = 0.4f;        // artistic warm tint (0 = pure blackbody colours)
 
     // ---- Sky ----
     uint32_t skySeed = 1337u;
@@ -51,15 +52,15 @@ struct Settings {
     float skyBrightness = 1.0f;
 
     // ---- Post ----
-    float exposure = 1.0f;
+    float exposure = 1.15f;
     bool autoExposure = false;
-    float bloomIntensity = 0.3f;
-    float bloomThreshold = 1.0f;
+    float bloomIntensity = 0.22f;
+    float bloomThreshold = 1.4f;
     int tonemap = TONEMAP_AGX;
     float vignette = 0.35f;
     float grain = 0.02f;
     float chromaticAberration = 0.0f;
-    float saturation = 1.0f;
+    float saturation = 1.15f;
     float sharpen = 0.3f;
 
     // ---- Camera ----

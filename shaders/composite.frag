@@ -1,17 +1,20 @@
 #version 460 core
-// Final pass: exposure, tonemap, vignette, grain, sRGB encode.
+// Final pass: bloom, chromatic aberration, exposure, tonemap, vignette, grain, sRGB encode.
 #include "common.glsl"
 
 in vec2 vUv;
 layout(location = 0) out vec4 fragColor;
 
 uniform sampler2D uHdr;
+uniform sampler2D uBloom;
 uniform vec2  uResolution;
 uniform float uExposure;
 uniform int   uTonemap;
 uniform float uVignette;
 uniform float uGrain;
 uniform float uSaturation;
+uniform float uBloomIntensity;
+uniform float uChroma;
 
 // ---- AgX (Troy Sobotka), minimal fit by Benjamin Wrensch ----
 vec3 agxDefaultContrastApprox(vec3 x) {
@@ -35,7 +38,7 @@ vec3 agxEotf(vec3 val) {
                                   -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
                                   -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
     val = agx_mat_inv * val;
-    return pow(max(val, 0.0), vec3(2.2));   // back to linear
+    return pow(max(val, 0.0), vec3(2.2));
 }
 vec3 acesFitted(vec3 x) {
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
@@ -45,9 +48,22 @@ vec3 toSrgb(vec3 c) {
     return mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
 }
 
+vec3 fetchScene(vec2 uv) {
+    return texture(uHdr, uv).rgb + texture(uBloom, uv).rgb * uBloomIntensity;
+}
+
 void main() {
-    vec3 hdr = texture(uHdr, vUv).rgb * uExposure;
-    // saturation in linear space before the curve
+    vec2 q = vUv * 2.0 - 1.0;
+    vec3 hdr;
+    if (uChroma > 0.001) {
+        vec2 off = q * (uChroma * 0.004) * length(q);
+        hdr.r = fetchScene(vUv + off).r;
+        hdr.g = fetchScene(vUv).g;
+        hdr.b = fetchScene(vUv - off).b;
+    } else {
+        hdr = fetchScene(vUv);
+    }
+    hdr *= uExposure;
     float l = luminance(hdr);
     hdr = max(mix(vec3(l), hdr, uSaturation), 0.0);
 
@@ -57,13 +73,11 @@ void main() {
     else if (uTonemap == 2) c = hdr / (1.0 + hdr);
     else c = hdr;
 
-    // vignette
-    vec2 q = vUv * 2.0 - 1.0;
-    q.x *= uResolution.x / uResolution.y;
-    float vig = 1.0 - uVignette * smoothstep(0.6, 2.2, length(q) * 0.9);
+    vec2 qa = q;
+    qa.x *= uResolution.x / uResolution.y;
+    float vig = 1.0 - uVignette * smoothstep(0.6, 2.2, length(qa) * 0.9);
     c *= vig;
 
-    // film grain (temporal)
     float g = hash12(gl_FragCoord.xy + fract(uTime * 7.31) * 1024.0) - 0.5;
     c += g * uGrain * (0.15 + 0.85 * (1.0 - luminance(c)));
 

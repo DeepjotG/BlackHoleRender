@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Black Hole Simulation
+Comment=Real-time gravitationally lensed black hole
+Exec=/mnt/storage/BlackholeSimulation/run.sh --fullscreen
+Path=/mnt/storage/BlackholeSimulation
+Terminal=false
+Categories=Science;Graphics;
+PrefersNonDefaultGPU=true

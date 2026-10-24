@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include "Camera.h"
+#include "Capture.h"
 #include "Log.h"
 #include "Settings.h"
 
@@ -20,6 +22,18 @@ float halton(int index, int base) {
     }
     return r;
 }
+glm::vec2 jitterFor(int sample) {
+    if (sample <= 0) return glm::vec2(0.0f);
+    return glm::vec2(halton(sample, 2) - 0.5f, halton(sample, 3) - 0.5f);
+}
+float halfToFloat(uint16_t h) {
+    const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+    float v;
+    if (e == 0) v = std::ldexp(static_cast<float>(m), -24);
+    else if (e == 31) v = m ? NAN : INFINITY;
+    else v = std::ldexp(static_cast<float>(m | 0x400u), static_cast<int>(e) - 25);
+    return s ? -v : v;
+}
 }  // namespace
 
 bool Renderer::init() {
@@ -29,19 +43,38 @@ bool Renderer::init() {
 }
 
 void Renderer::shutdown() {
-    traceProg_.destroy();
-    compositeProg_.destroy();
+    for (ShaderProgram* p : {&traceProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) p->destroy();
     destroyTarget(trace_);
+    destroyTarget(accum_[0]);
+    destroyTarget(accum_[1]);
+    destroyTarget(upscaled_);
+    destroyTarget(lumaProbe_);
+    destroyTarget(captureOut_);
+    for (Target& b : bloom_) destroyTarget(b);
     if (vao_) glDeleteVertexArrays(1, &vao_);
     glDeleteQueries(kQueryRing, queries_);
     vao_ = 0;
 }
 
+bool Renderer::shadersOk() const {
+    return traceProg_.valid() && accumProg_.valid() && upscaleProg_.valid() && bloomDownProg_.valid() &&
+           bloomUpProg_.valid() && compositeProg_.valid();
+}
+
 bool Renderer::reloadShaders() {
     bool ok = true;
     shaderLog_.clear();
-    if (!traceProg_.loadGraphics("fullscreen.vert", "blackhole.frag")) { ok = false; shaderLog_ += traceProg_.log(); }
-    if (!compositeProg_.loadGraphics("fullscreen.vert", "composite.frag")) { ok = false; shaderLog_ += compositeProg_.log(); }
+    struct Entry { ShaderProgram* p; const char* frag; };
+    const Entry entries[] = {
+        {&traceProg_, "blackhole.frag"},   {&accumProg_, "accumulate.frag"}, {&upscaleProg_, "upscale.frag"},
+        {&bloomDownProg_, "bloom_down.frag"}, {&bloomUpProg_, "bloom_up.frag"}, {&compositeProg_, "composite.frag"},
+    };
+    for (const Entry& e : entries) {
+        if (!e.p->loadGraphics("fullscreen.vert", e.frag)) {
+            ok = false;
+            shaderLog_ += e.p->log();
+        }
+    }
     if (ok) logInfo("shaders compiled");
     accumCount_ = 0;
     return ok;
@@ -49,8 +82,12 @@ bool Renderer::reloadShaders() {
 
 bool Renderer::checkShaderReload() {
     bool any = false;
-    if (traceProg_.reloadIfChanged()) { any = true; shaderLog_ = traceProg_.log(); }
-    if (compositeProg_.reloadIfChanged()) { any = true; shaderLog_ += compositeProg_.log(); }
+    for (ShaderProgram* p : {&traceProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) {
+        if (p->reloadIfChanged()) {
+            any = true;
+            shaderLog_ = p->log();
+        }
+    }
     if (any) {
         logInfo("shaders hot-reloaded{}", shaderLog_.empty() ? "" : " (with errors)");
         accumCount_ = 0;
@@ -61,7 +98,9 @@ bool Renderer::checkShaderReload() {
 void Renderer::ensureTarget(Target& t, int w, int h, GLenum fmt) {
     if (t.fbo && t.w == w && t.h == h && t.fmt == fmt) return;
     destroyTarget(t);
-    t.w = w; t.h = h; t.fmt = fmt;
+    t.w = w;
+    t.h = h;
+    t.fmt = fmt;
     glGenTextures(1, &t.tex);
     glBindTexture(GL_TEXTURE_2D, t.tex);
     glTexStorage2D(GL_TEXTURE_2D, 1, fmt, w, h);
@@ -90,9 +129,8 @@ void Renderer::drawFullscreen() {
 }
 
 void Renderer::beginTimer() {
-    // Collect the oldest finished query before issuing a new one.
     if (queriesIssued_ >= kQueryRing) {
-        const int oldest = queryWrite_;  // ring slot about to be reused
+        const int oldest = queryWrite_;
         GLuint available = 0;
         glGetQueryObjectuiv(queries_[oldest], GL_QUERY_RESULT_AVAILABLE, &available);
         if (available) {
@@ -113,7 +151,10 @@ void Renderer::endTimer() {
 
 void Renderer::updateDynamicScale(const FrameInput& in) {
     const Settings& s = *in.settings;
-    if (!s.dynamicResolution) { dynScale_ = 1.0f; return; }
+    if (!s.dynamicResolution) {
+        dynScale_ = 1.0f;
+        return;
+    }
     dynTimer_ += in.dt;
     if (dynTimer_ < 0.4f || gpuMs_ <= 0.0f) return;
     dynTimer_ = 0.0f;
@@ -126,13 +167,13 @@ void Renderer::updateDynamicScale(const FrameInput& in) {
     }
 }
 
-void Renderer::setTraceUniforms(const FrameInput& in, const glm::vec2& jitter) {
+void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const glm::vec2& jitter) {
     const Settings& s = *in.settings;
     const Camera& cam = *in.camera;
     ShaderProgram& p = traceProg_;
     const float tanHalf = std::tan(glm::radians(s.fovDeg) * 0.5f);
-    const float pixelAngle = 2.0f * tanHalf / static_cast<float>(trace_.h);
-    p.set("uResolution", glm::vec2(trace_.w, trace_.h));
+    const float pixelAngle = 2.0f * tanHalf / static_cast<float>(dst.h);
+    p.set("uResolution", glm::vec2(dst.w, dst.h));
     p.set("uJitter", jitter);
     p.set("uCamPos", cam.position());
     p.set("uCamBasis", cam.basis());
@@ -148,7 +189,6 @@ void Renderer::setTraceUniforms(const FrameInput& in, const glm::vec2& jitter) {
     p.set("uPixelOmega0", pixelAngle * pixelAngle);
     p.set("uPixelAngle", pixelAngle);
     p.set("uDebugView", in.debugView);
-    // disk
     p.set("uDiskInner", s.diskInner);
     p.set("uDiskOuter", s.diskOuter);
     p.set("uDiskThickness", s.diskThickness);
@@ -159,11 +199,10 @@ void Renderer::setTraceUniforms(const FrameInput& in, const glm::vec2& jitter) {
     p.set("uDiskNoiseScale", s.diskNoiseScale);
     p.set("uDiskNoiseStrength", s.diskNoiseStrength);
     p.set("uDiskSpeed", s.diskSpeed);
-    // sky
+    p.set("uDiskWarmth", s.diskWarmth);
     p.set("uSkyBrightness", s.skyBrightness);
     p.set("uStarDensity", s.starDensity);
     p.set("uStarBrightness", s.starBrightness);
-    // samplers
     p.set("uSkyCube", 0);
     p.set("uNoise3d", 1);
     p.set("uBlackbodyLut", 2);
@@ -175,6 +214,164 @@ void Renderer::setTraceUniforms(const FrameInput& in, const glm::vec2& jitter) {
     glBindTexture(GL_TEXTURE_1D, in.blackbodyLut);
 }
 
+void Renderer::tracePass(const FrameInput& in, Target& dst, const glm::vec2& jitter, bool banded) {
+    glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo);
+    glViewport(0, 0, dst.w, dst.h);
+    traceProg_.use();
+    setTraceUniforms(in, dst, jitter);
+    if (!banded) {
+        drawFullscreen();
+        return;
+    }
+    // Split tall renders into bands so no single GPU job runs long enough to trip the watchdog.
+    glEnable(GL_SCISSOR_TEST);
+    const int band = 128;
+    for (int y = 0; y < dst.h; y += band) {
+        glScissor(0, y, dst.w, std::min(band, dst.h - y));
+        drawFullscreen();
+        glFlush();
+    }
+    glDisable(GL_SCISSOR_TEST);
+}
+
+const Renderer::Target& Renderer::accumulatePass(const FrameInput& in, const Target& current, int sampleIndex, int cap) {
+    Target& prev = accum_[accumPing_];
+    Target& next = accum_[accumPing_ ^ 1];
+    ensureTarget(prev, current.w, current.h, GL_RGBA32F);
+    ensureTarget(next, current.w, current.h, GL_RGBA32F);
+    const int n = std::min(sampleIndex, std::max(cap - 1, 0));
+    const float weight = (sampleIndex == 0) ? 1.0f : 1.0f / static_cast<float>(n + 1);
+    glBindFramebuffer(GL_FRAMEBUFFER, next.fbo);
+    glViewport(0, 0, next.w, next.h);
+    accumProg_.use();
+    accumProg_.set("uCurrent", 0);
+    accumProg_.set("uPrevious", 1);
+    accumProg_.set("uWeight", weight);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, current.tex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, prev.tex);
+    drawFullscreen();
+    accumPing_ ^= 1;
+    (void)in;
+    return next;
+}
+
+void Renderer::upscalePass(const FrameInput& in, const Target& src, Target& dst) {
+    glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo);
+    glViewport(0, 0, dst.w, dst.h);
+    upscaleProg_.use();
+    upscaleProg_.set("uSrc", 0);
+    upscaleProg_.set("uSrcTexel", glm::vec2(1.0f / src.w, 1.0f / src.h));
+    upscaleProg_.set("uSharpen", in.settings->sharpen);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src.tex);
+    drawFullscreen();
+}
+
+void Renderer::bloomPass(const FrameInput& in, const Target& src) {
+    const Settings& s = *in.settings;
+    // Build the chain of half-resolution targets.
+    bloomLevels_ = 0;
+    int w = src.w / 2, h = src.h / 2;
+    while (bloomLevels_ < kMaxBloomLevels && w >= 8 && h >= 8) {
+        ensureTarget(bloom_[bloomLevels_], w, h, GL_R11F_G11F_B10F);
+        ++bloomLevels_;
+        w /= 2;
+        h /= 2;
+    }
+    if (bloomLevels_ == 0) return;
+    glDisable(GL_BLEND);
+    bloomDownProg_.use();
+    bloomDownProg_.set("uSrc", 0);
+    glActiveTexture(GL_TEXTURE0);
+    for (int i = 0; i < bloomLevels_; ++i) {
+        const Target& from = (i == 0) ? src : bloom_[i - 1];
+        glBindFramebuffer(GL_FRAMEBUFFER, bloom_[i].fbo);
+        glViewport(0, 0, bloom_[i].w, bloom_[i].h);
+        bloomDownProg_.set("uSrcTexel", glm::vec2(1.0f / from.w, 1.0f / from.h));
+        bloomDownProg_.set("uThreshold", i == 0 ? s.bloomThreshold : -1.0f);
+        glBindTexture(GL_TEXTURE_2D, from.tex);
+        drawFullscreen();
+    }
+    // Upsample additively back down the chain.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    bloomUpProg_.use();
+    bloomUpProg_.set("uSrc", 0);
+    bloomUpProg_.set("uScale", 1.0f);
+    for (int i = bloomLevels_ - 2; i >= 0; --i) {
+        const Target& from = bloom_[i + 1];
+        glBindFramebuffer(GL_FRAMEBUFFER, bloom_[i].fbo);
+        glViewport(0, 0, bloom_[i].w, bloom_[i].h);
+        bloomUpProg_.set("uSrcTexel", glm::vec2(1.0f / from.w, 1.0f / from.h));
+        glBindTexture(GL_TEXTURE_2D, from.tex);
+        drawFullscreen();
+    }
+    glDisable(GL_BLEND);
+}
+
+void Renderer::updateAutoExposure(const FrameInput& in, const Target& hdr) {
+    const Settings& s = *in.settings;
+    if (!s.autoExposure) {
+        autoGain_ = 1.0f;
+        return;
+    }
+    autoTimer_ += in.dt;
+    if (autoTimer_ < 0.1f) return;
+    autoTimer_ = 0.0f;
+    ensureTarget(lumaProbe_, 32, 18, GL_RGBA16F);
+    glBindFramebuffer(GL_FRAMEBUFFER, lumaProbe_.fbo);
+    glViewport(0, 0, lumaProbe_.w, lumaProbe_.h);
+    bloomDownProg_.use();
+    bloomDownProg_.set("uSrc", 0);
+    bloomDownProg_.set("uSrcTexel", glm::vec2(1.0f / hdr.w, 1.0f / hdr.h) * 8.0f);
+    bloomDownProg_.set("uThreshold", -1.0f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, hdr.tex);
+    drawFullscreen();
+    std::vector<uint16_t> px(static_cast<size_t>(lumaProbe_.w) * lumaProbe_.h * 4);
+    glReadPixels(0, 0, lumaProbe_.w, lumaProbe_.h, GL_RGBA, GL_HALF_FLOAT, px.data());
+    double sumLog = 0.0;
+    int n = 0;
+    for (size_t i = 0; i < px.size(); i += 4) {
+        const float r = halfToFloat(px[i]), g = halfToFloat(px[i + 1]), b = halfToFloat(px[i + 2]);
+        const float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        if (std::isfinite(lum)) {
+            sumLog += std::log(static_cast<double>(lum) + 1e-4);
+            ++n;
+        }
+    }
+    if (n == 0) return;
+    const float avg = static_cast<float>(std::exp(sumLog / n));
+    const float target = std::clamp(0.25f / std::max(avg, 1e-4f), 0.15f, 12.0f);
+    const float k = 1.0f - std::exp(-0.1f / 0.9f);
+    autoGain_ += (target - autoGain_) * k;
+}
+
+void Renderer::compositePass(const FrameInput& in, const Target& hdr, GLuint dstFbo, int w, int h) {
+    const Settings& s = *in.settings;
+    glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
+    glViewport(0, 0, w, h);
+    compositeProg_.use();
+    compositeProg_.set("uHdr", 0);
+    compositeProg_.set("uBloom", 1);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, hdr.tex);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, bloomLevels_ > 0 ? bloom_[0].tex : hdr.tex);
+    compositeProg_.set("uResolution", glm::vec2(w, h));
+    compositeProg_.set("uExposure", s.exposure * autoGain_);
+    compositeProg_.set("uTonemap", s.tonemap);
+    compositeProg_.set("uVignette", s.vignette);
+    compositeProg_.set("uGrain", s.grain);
+    compositeProg_.set("uSaturation", s.saturation);
+    compositeProg_.set("uBloomIntensity", bloomLevels_ > 0 ? s.bloomIntensity : 0.0f);
+    compositeProg_.set("uChroma", s.chromaticAberration);
+    compositeProg_.set("uTime", in.time);
+    drawFullscreen();
+}
+
 void Renderer::render(const FrameInput& in) {
     const Settings& s = *in.settings;
     updateDynamicScale(in);
@@ -182,38 +379,51 @@ void Renderer::render(const FrameInput& in) {
     const int iw = std::max(16, static_cast<int>(std::lround(in.windowW * scale)));
     const int ih = std::max(16, static_cast<int>(std::lround(in.windowH * scale)));
     ensureTarget(trace_, iw, ih, GL_RGBA16F);
+    ensureTarget(upscaled_, in.windowW, in.windowH, GL_RGBA16F);
     if (in.resetAccumulation) accumCount_ = 0;
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     beginTimer();
 
-    // ---- trace pass ----
-    glBindFramebuffer(GL_FRAMEBUFFER, trace_.fbo);
-    glViewport(0, 0, iw, ih);
-    traceProg_.use();
-    setTraceUniforms(in, glm::vec2(0.0f));
-    drawFullscreen();
-
-    // ---- composite ----
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, in.windowW, in.windowH);
-    compositeProg_.use();
-    compositeProg_.set("uHdr", 0);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, trace_.tex);
-    compositeProg_.set("uResolution", glm::vec2(in.windowW, in.windowH));
-    compositeProg_.set("uExposure", s.exposure);
-    compositeProg_.set("uTonemap", s.tonemap);
-    compositeProg_.set("uVignette", s.vignette);
-    compositeProg_.set("uGrain", s.grain);
-    compositeProg_.set("uSaturation", s.saturation);
-    compositeProg_.set("uTime", in.time);
-    drawFullscreen();
+    const bool accumulate = s.accumulate;
+    const int cap = accumulate ? (in.diskAnimating ? std::min(s.maxAccumFrames, 24) : s.maxAccumFrames) : 1;
+    const int sample = accumulate ? accumCount_ : 0;
+    tracePass(in, trace_, accumulate ? jitterFor(sample) : glm::vec2(0.0f), false);
+    const Target* hdrInternal = &trace_;
+    if (accumulate) hdrInternal = &accumulatePass(in, trace_, sample, cap);
+    upscalePass(in, *hdrInternal, upscaled_);
+    bloomPass(in, upscaled_);
+    updateAutoExposure(in, upscaled_);
+    compositePass(in, upscaled_, 0, in.windowW, in.windowH);
 
     endTimer();
-    ++accumCount_;
-    (void)halton;
+    accumCount_ = std::min(accumCount_ + 1, 1 << 20);
+}
+
+bool Renderer::captureHighRes(const FrameInput& in, int width, int height, int samples, const std::string& path) {
+    if (!shadersOk()) return false;
+    logInfo("cinematic capture {}x{} with {} samples...", width, height, samples);
+    ensureTarget(trace_, width, height, GL_RGBA16F);
+    ensureTarget(upscaled_, width, height, GL_RGBA16F);
+    ensureTarget(captureOut_, width, height, GL_RGBA8);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    const Target* hdr = &trace_;
+    for (int sIdx = 0; sIdx < std::max(samples, 1); ++sIdx) {
+        tracePass(in, trace_, jitterFor(sIdx), true);
+        hdr = &accumulatePass(in, trace_, sIdx, samples);
+        glFinish();
+        if ((sIdx + 1) % 4 == 0 || sIdx + 1 == samples) logInfo("  sample {}/{}", sIdx + 1, samples);
+    }
+    upscalePass(in, *hdr, upscaled_);
+    bloomPass(in, upscaled_);
+    compositePass(in, upscaled_, captureOut_.fbo, width, height);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, captureOut_.fbo);
+    const bool ok = capture::savePngFromFramebuffer(path, width, height);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    accumCount_ = 0;
+    return ok;
 }
 
 }  // namespace bhs

@@ -37,6 +37,8 @@ struct Options {
     bool hasPos = false, hasTarget = false;
     glm::vec3 pos{0.0f}, target{0.0f};
     std::string screenshot;
+    std::string cinematic;
+    int captureW = 3840, captureH = 2160, captureSamples = 24;
     std::string shaderDir;
     std::string settingsPath = "settings.ini";
 };

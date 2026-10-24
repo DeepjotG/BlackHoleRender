@@ -291,8 +291,16 @@ void App::frame() {
     fi.noise3d = diskTex_.noise3d();
     fi.blackbodyLut = diskTex_.blackbodyLut();
     fi.resetAccumulation = camera_.movedThisFrame() || settingsChanged;
+    fi.diskAnimating = !settings_.paused && settings_.diskSpeed > 0.0f && settings_.diskMode != DISK_NONE;
     fi.debugView = debugView_;
     renderer_.render(fi);
+
+    if (requestCinematic_ || (!opt_.cinematic.empty() && frameIndex_ == 1)) {
+        requestCinematic_ = false;
+        const std::string path = opt_.cinematic.empty() ? capture::timestampedPath("screenshots", "cinematic") : opt_.cinematic;
+        renderer_.captureHighRes(fi, opt_.captureW, opt_.captureH, opt_.captureSamples, path);
+        if (!opt_.cinematic.empty()) quit_ = true;
+    }
 
     const bool lastFrame = opt_.frames > 0 && frameIndex_ + 1 >= opt_.frames;
     const bool wantShot = requestScreenshot_ || (lastFrame && !opt_.screenshot.empty());
@@ -323,10 +331,6 @@ void App::frame() {
         const std::string path = (lastFrame && !opt_.screenshot.empty()) ? opt_.screenshot
                                                                          : capture::timestampedPath("screenshots", "blackhole");
         capture::savePngFromFramebuffer(path, fbW_, fbH_);
-    }
-    if (requestCinematic_) {
-        requestCinematic_ = false;
-        logInfo("cinematic capture is not implemented yet");
     }
 
     glfwSwapBuffers(window_);

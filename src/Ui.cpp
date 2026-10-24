@@ -132,6 +132,7 @@ void Ui::draw(UiContext& c) {
         ImGui::SliderFloat("Noise scale", &s.diskNoiseScale, 0.25f, 4.0f, "%.2f");
         ImGui::SliderFloat("Noise strength", &s.diskNoiseStrength, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Rotation speed", &s.diskSpeed, 0.0f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Warm tint", &s.diskWarmth, 0.0f, 1.0f, "%.2f");
         ImGui::Checkbox("Pause disk (P)", &s.paused);
     }
 

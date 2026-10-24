@@ -17,6 +17,7 @@ void usage() {
         "  --pos x,y,z              camera position (M units); --target x,y,z look-at point\n"
         "  --frames N               render N frames then exit (automation)\n"
         "  --screenshot FILE.png    save the last frame (use with --frames)\n"
+        "  --cinematic FILE.png     offline high-res capture then exit (--capture-size WxH, --samples N)\n"
         "  --benchmark              time every preset and print a table\n"
         "  --lensing 0|1  --disk none|thin|volumetric  --doppler F  --exposure F  --time SEC\n"
         "  --debug steps|footprint  diagnostic views\n"
@@ -63,6 +64,9 @@ int main(int argc, char** argv) {
         else if (a == "--target") { o.hasTarget = parseVec3(next(), o.target); if (!o.hasTarget) { usage(); return 2; } }
         else if (a == "--frames") o.frames = std::stoi(next());
         else if (a == "--screenshot") o.screenshot = next();
+        else if (a == "--cinematic") o.cinematic = next();
+        else if (a == "--capture-size") { if (std::sscanf(next().c_str(), "%dx%d", &o.captureW, &o.captureH) != 2) { usage(); return 2; } }
+        else if (a == "--samples") o.captureSamples = std::stoi(next());
         else if (a == "--benchmark") o.benchmark = true;
         else if (a == "--lensing") o.lensing = std::stoi(next());
         else if (a == "--disk") {

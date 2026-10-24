@@ -93,25 +93,26 @@ vec3 milkyWay(vec3 d) {
     float lat = asin(clamp(dot(d, uGalacticNorth), -1.0, 1.0));
     float lon = atan(dot(d, e2), dot(d, uGalacticCentre));
     float coreLon = exp(-pow(lon / 1.25, 2.0));
-    float band = exp(-pow(lat / 0.17, 2.0)) * (0.3 + 0.7 * coreLon);
-    float bulge = exp(-pow(lat / 0.12, 2.0) - pow(lon / 0.35, 2.0)) * 1.6;
+    float band = exp(-pow(lat / 0.2, 2.0)) * (0.3 + 0.7 * coreLon) + 0.25 * exp(-pow(lat / 0.45, 2.0)) * coreLon;
+    float bulge = exp(-pow(lat / 0.14, 2.0) - pow(lon / 0.4, 2.0)) * 2.2;
     // Cloudy structure with domain warping.
     vec3 p = d * 6.0;
     vec3 warp = vec3(fbm3(p + 3.1, 4, 0.5, 101u), fbm3(p + 7.7, 4, 0.5, 103u), fbm3(p + 1.3, 4, 0.5, 107u));
     float clouds = fbm3(p * 1.3 + warp * 1.2, 7, 0.55, 109u);
     float fine = fbm3(d * 60.0, 3, 0.5, 113u);
-    float structure = 0.55 + 0.9 * clouds + 0.25 * fine;
+    float structure = 0.45 + 1.2 * clouds + 0.3 * fine;
     // Dark dust lanes hugging the plane.
     float dustN = fbm3(d * 9.0 + warp * 0.8, 6, 0.55, 131u);
-    float dust = smoothstep(0.08, 0.42, dustN) * exp(-pow(lat / 0.06, 2.0));
-    float I = (band * structure + bulge * (0.6 + 0.5 * clouds)) * (1.0 - 0.85 * dust);
-    vec3 warm = vec3(1.0, 0.82, 0.62);
-    vec3 cool = vec3(0.72, 0.80, 1.0);
-    vec3 col = mix(cool, warm, clamp(coreLon * 0.8 + 0.3 * clouds, 0.0, 1.0));
+    float dust = smoothstep(0.0, 0.38, dustN) * exp(-pow(lat / 0.07, 2.0));
+    float I = (band * structure + bulge * (0.6 + 0.5 * clouds)) * (1.0 - 0.92 * dust);
+    vec3 warm = vec3(1.0, 0.72, 0.42);
+    vec3 cool = vec3(0.55, 0.68, 1.0);
+    float warmth = exp(-pow(lon / 0.7, 2.0)) * exp(-pow(lat / 0.35, 2.0));
+    vec3 col = mix(cool, warm, clamp(warmth * 0.9 + 0.15 * clouds, 0.0, 1.0));
     // Reddish glow of HII regions along the plane.
     float hii = smoothstep(0.35, 0.7, fbm3(d * 14.0 + 5.0, 4, 0.5, 137u)) * exp(-pow(lat / 0.1, 2.0));
-    col = mix(col, vec3(1.0, 0.55, 0.5), 0.45 * hii);
-    return col * max(I, 0.0) * 0.045 * uMilkyWay;
+    col = mix(col, vec3(1.0, 0.45, 0.42), 0.6 * hii);
+    return col * max(I, 0.0) * 0.09 * uMilkyWay;
 }
 
 vec3 nebulae(vec3 d) {
@@ -131,12 +132,15 @@ vec3 nebulae(vec3 d) {
         float n2 = fbm3(p * 5.0 - warp, 5, 0.5, 241u + uint(i));
         float fall = exp(-pow(ang / R, 2.0) * 1.6);
         float dens = smoothstep(-0.15, 0.55, n + 0.3 * n2) * fall;
-        vec3 palA = mix(vec3(1.0, 0.35, 0.45), vec3(0.35, 0.65, 1.0), h2.z);
-        vec3 palB = mix(vec3(0.95, 0.6, 0.3), vec3(0.3, 0.9, 0.8), h.y);
-        vec3 col = mix(palA, palB, clamp(0.5 + 0.9 * n2, 0.0, 1.0));
+        // Two-tone emission: H-alpha red cores with blue reflection edges, or teal/amber variants.
+        vec3 palA = (h2.z < 0.6) ? vec3(1.0, 0.28, 0.38) : vec3(0.25, 0.9, 0.75);
+        vec3 palB = (h.y < 0.5) ? vec3(0.35, 0.55, 1.0) : vec3(1.0, 0.65, 0.3);
+        float core = smoothstep(0.1, 0.7, n + 0.2 * n2) * fall;
+        float edge = smoothstep(-0.2, 0.3, n) * (1.0 - core) * fall;
+        vec3 col = palA * core * 1.3 + palB * edge * 0.5;
         // Dark filaments.
         float dark = smoothstep(0.1, 0.5, fbm3(p * 4.0 + 61.0, 5, 0.5, 251u + uint(i)));
-        total += col * dens * (1.0 - 0.6 * dark * fall) * 0.09;
+        total += col * (dens + 0.3 * core) * (1.0 - 0.6 * dark * fall) * 0.32;
     }
     return total * uNebula;
 }

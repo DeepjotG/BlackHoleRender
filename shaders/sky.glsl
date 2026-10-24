@@ -34,7 +34,7 @@ Footprint makeFootprint(vec3 a, vec3 b, float omega0) {
 vec3 starLayer(vec3 d, Footprint fp, float N, float prob, float flux, float sigStar, float omega0, uint salt, float gShift) {
     float footprintCells = pow(fp.det, 0.25) * N;
     float w = smoothstep(0.8, 2.5, footprintCells);           // large footprint -> use the mean sky
-    vec3 avg = blackbody(5600.0 * gShift).rgb * (prob * N * N * 4.65 * flux * omega0);
+    vec3 avg = blackbody(5600.0 * gShift).rgb * (prob * N * N * 8.5 * flux * omega0);
     vec3 sum = vec3(0.0);
     if (w < 1.0) {
         float invDet = 1.0 / fp.det;
@@ -65,9 +65,10 @@ vec3 starLayer(vec3 d, Footprint fp, float N, float prob, float flux, float sigS
             float sq = iGab * ra + iGbb * rb;
             float e = iSaa * sp * sp + 2.0 * iSab * sp * sq + iSbb * sq * sq;
             if (e > 30.0) continue;
-            float F = flux * pow(max(u.y, 1e-4), -0.83);        // heavy-tailed brightness
-            float T = exp(mix(log(2600.0), log(30000.0), pow(u.z, 2.2)));
-            sum += blackbody(T * gShift).rgb * (F * norm * exp(-0.5 * e));
+            float F = flux * pow(max(u.y, 2e-4), -1.0);         // heavy-tailed brightness
+            float T = exp(mix(log(3000.0), log(22000.0), pow(u.z, 1.7)));
+            vec3 sc = mix(vec3(1.0), blackbody(T * gShift).rgb, 0.7);
+            sum += sc * (F * norm * exp(-0.5 * e));
         }
     }
     return mix(sum, avg, w);
@@ -80,8 +81,8 @@ vec3 sampleSky(vec3 d, vec3 a, vec3 b, float omega0, float rcam) {
     vec3 col = textureGrad(uSkyCube, d, a, b).rgb * (uSkyBrightness * g4);
     Footprint fp = makeFootprint(a, b, omega0);
     float sb = uStarBrightness * g4;
-    col += starLayer(d, fp, 180.0, 0.35 * uStarDensity, 0.012 * sb, 0.0004, omega0, 11u, g);
-    col += starLayer(d, fp, 42.0, 0.30 * uStarDensity, 0.25 * sb, 0.0012, omega0, 23u, g);
+    col += starLayer(d, fp, 200.0, 0.40 * uStarDensity, 0.0045 * sb, 0.0004, omega0, 11u, g);
+    col += starLayer(d, fp, 48.0, 0.25 * uStarDensity, 0.06 * sb, 0.0011, omega0, 23u, g);
     return col;
 }
 #endif

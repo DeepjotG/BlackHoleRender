@@ -15,6 +15,10 @@ uniform float uDiskBrightness;
 uniform float uDiskNoiseScale;
 uniform float uDiskNoiseStrength;
 uniform float uDiskSpeed;
+uniform float uDiskWarmth;
+
+// Film-style warm grade applied to the disk's blackbody colour.
+vec3 diskTint(vec3 c) { return c * mix(vec3(1.0), vec3(1.0, 0.80, 0.58), uDiskWarmth); }
 
 float diskSlabHalfHeight(float r) { return 2.5 * uDiskThickness * r; }
 
@@ -46,7 +50,7 @@ float diskNoise(float r, float phi, float yOverH) {
     float t2 = mod(t + 0.5 * P, P);
     float w2 = abs(2.0 * t1 / P - 1.0);
     float rep = max(1.0, floor(2.0 * uDiskNoiseScale + 0.5));   // integer azimuthal repeats -> seamless
-    float lr = log(r) * 1.4 * uDiskNoiseScale;
+    float lr = log(r) * 3.2 * uDiskNoiseScale;
     float yy = yOverH * 0.35;
     vec3 c1 = vec3((phi - omega * t1) * (rep / TWO_PI), lr, yy);
     vec3 c2 = vec3((phi - omega * t2) * (rep / TWO_PI), lr + 0.37, yy + 0.61);
@@ -61,25 +65,30 @@ float diskRadialProfile(float r) {
     return inner * outer * pow(uDiskInner / max(r, uDiskInner), 1.2);
 }
 
-float diskDensity(vec3 p, float r) {
+// Returns density; `emit` receives the local surface-brightness multiplier (hot lanes vs dark gaps).
+float diskDensity(vec3 p, float r, out float emit) {
     float H = max(uDiskThickness * r, 1e-3);
     float yh = p.y / H;
     float vert = exp(-yh * yh);
     float phi = atan(p.z, p.x);
     float n = diskNoise(r, phi, yh);
-    float filaments = smoothstep(0.25, 0.85, n) * 1.6;
-    float pattern = mix(1.0, filaments, uDiskNoiseStrength);
-    return uDiskDensity * diskRadialProfile(r) * vert * pattern;
+    float f = smoothstep(0.32, 0.78, n);
+    float pattern = mix(1.0, mix(0.08, 1.4, f), uDiskNoiseStrength);
+    emit = mix(1.0, mix(0.22, 1.35, f * f), uDiskNoiseStrength);
+    // Turbulent puffing of the outer disk.
+    float puff = 1.0 + 0.6 * smoothstep(uDiskOuter * 0.4, uDiskOuter, r) * (n - 0.5);
+    return uDiskDensity * diskRadialProfile(r) * vert * pattern * max(puff, 0.0);
 }
 
 // Volumetric emission/absorption over one march segment of length ds centred at p.
 void volumetricDiskStep(vec3 p, float r, float ds, float bAxis, float rcam, inout vec3 color, inout float transmittance) {
-    float dens = diskDensity(p, r);
+    float emit;
+    float dens = diskDensity(p, r, emit);
     if (dens < 1e-4) return;
-    float T = uDiskPeakTemp * diskTempProfile(r);
+    float T = uDiskPeakTemp * diskTempProfile(r) * mix(1.0, 0.85 + 0.3 * emit, 0.5);
     float g = mix(1.0, redshiftFactor(r, bAxis, rcam), uDopplerStrength);
     vec4 bb = blackbody(T * g);
-    vec3 source = bb.rgb * (bb.a * uDiskBrightness);     // radiance of an optically thick column
+    vec3 source = diskTint(bb.rgb) * (bb.a * uDiskBrightness * emit);   // radiance of an optically thick column
     float absorb = dens * uDiskOpacity;
     float a = 1.0 - exp(-absorb * ds);
     color += transmittance * source * a;
@@ -92,13 +101,15 @@ vec4 thinDiskSample(vec3 hit, float bAxis, float rcam) {
     if (r < uDiskInner || r > uDiskOuter) return vec4(0.0);
     float phi = atan(hit.z, hit.x);
     float n = diskNoise(r, phi, 0.0);
-    float pattern = mix(1.0, smoothstep(0.2, 0.85, n) * 1.5, uDiskNoiseStrength);
+    float f = smoothstep(0.32, 0.78, n);
+    float pattern = mix(1.0, mix(0.08, 1.4, f), uDiskNoiseStrength);
+    float emit = mix(1.0, mix(0.22, 1.35, f * f), uDiskNoiseStrength);
     float dens = uDiskDensity * diskRadialProfile(r) * pattern;
-    float T = uDiskPeakTemp * diskTempProfile(r);
+    float T = uDiskPeakTemp * diskTempProfile(r) * mix(1.0, 0.85 + 0.3 * emit, 0.5);
     float g = mix(1.0, redshiftFactor(r, bAxis, rcam), uDopplerStrength);
     vec4 bb = blackbody(T * g);
     float alpha = 1.0 - exp(-dens * uDiskOpacity * 0.6);
-    vec3 radiance = bb.rgb * (bb.a * uDiskBrightness);
+    vec3 radiance = diskTint(bb.rgb) * (bb.a * uDiskBrightness * emit);
     return vec4(radiance, alpha);
 }
 #endif

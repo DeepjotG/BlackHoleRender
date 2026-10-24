@@ -33,8 +33,8 @@ const std::array<Bookmark, 4>& Camera::defaultBookmarks() {
         const glm::vec3 origin(0.0f);
         glm::vec3 p0(0.0f, 2.6f, 24.9f);                      // the "Interstellar" shot, ~6 deg above the disk
         a[0] = {"Interstellar shot", p0, lookRotation(p0, origin, glm::vec3(0, 1, 0))};
-        glm::vec3 p1(1.2f, 0.9f, 3.9f);                       // just outside the photon sphere
-        a[1] = {"Photon sphere skim", p1, lookRotation(p1, origin, glm::vec3(0, 1, 0))};
+        glm::vec3 p1(0.0f, 1.3f, 4.6f);                       // just outside the photon sphere, looking past the hole
+        a[1] = {"Photon sphere skim", p1, lookRotation(p1, glm::vec3(5.5f, 0.4f, 1.0f), glm::vec3(0, 1, 0))};
         glm::vec3 p2(0.0f, 32.0f, 0.001f);                    // top-down
         a[2] = {"Top-down", p2, lookRotation(p2, origin, glm::vec3(0, 0, -1))};
         glm::vec3 p3(120.0f, 60.0f, 480.0f);                  // far away
