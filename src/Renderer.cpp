@@ -198,6 +198,7 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     p.set("uUniverse", in.universe ? 1 : 0);
     p.set("uUniCube", 3);
     p.set("uUniStarScale", in.uniStarScale);
+    p.set("uUniSkyScale", in.uniSkyScale);
     p.set("uUniT", in.uniTileGrid);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_CUBE_MAP, in.universe ? in.uniCube : in.skyCubemap);

@@ -625,6 +625,20 @@ void UniverseScene::bakeChunk(int step) {
         glMemoryBarrier(GL_ALL_BARRIER_BITS);
         glBindTexture(GL_TEXTURE_CUBE_MAP, cube_);
         glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+        // Mean sky luminance from the 1x1 level of each face (six texels: a negligible read-back).
+        int top = 0;
+        for (int r = bakeRes_; r > 1; r >>= 1) ++top;
+        double sum = 0.0;
+        for (int f = 0; f < 6; ++f) {
+            float px[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, top, GL_RGBA, GL_FLOAT, px);
+            sum += 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+        }
+        skyMean_ = sum / 6.0;
+        // Keep the average sky below a dark-sky level (a band in a dark sky, as from inside a disk).
+        constexpr double kSkyTarget = 0.035;
+        skyExposureTarget_ = skyMean_ > kSkyTarget ? kSkyTarget / skyMean_ : 1.0;
+        if (std::getenv("BHS_DEBUG_BAKE")) logInfo("sky mean luminance {:.4f}, exposure {:.3f}", skyMean_, skyExposureTarget_);
         glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
     }
 }
@@ -846,6 +860,10 @@ void UniverseScene::prepareRender(const glm::dvec3& camPosM) {
         lastProjectCam_ = camGal;
     }
     starsChanged_ = false;
+
+    // Ease the sky exposure towards its target (about a second).
+    skyExposure_ += (skyExposureTarget_ - skyExposure_) * 0.05;
+    if (std::abs(skyExposure_ - skyExposureTarget_) < 1e-4) skyExposure_ = skyExposureTarget_;
 
     // ---- sky bake from the viewpoint, one strip of a face per frame while stale
     refreshGalaxyDistances(camGal);

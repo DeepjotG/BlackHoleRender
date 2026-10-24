@@ -8,6 +8,7 @@
 uniform int uUniverse;          // 1 = use the 3D universe sky
 uniform samplerCube uUniCube;   // rgb: diffuse light seen from the camera; a: optical depth
 uniform float uUniStarScale;    // radiance scale of a 0 mag star
+uniform float uUniSkyScale;     // exposure of the diffuse light (dimmed inside very bright places)
 uniform int uUniT;              // star tiles per cube-face edge
 
 struct UStar {
@@ -68,7 +69,7 @@ vec3 universeStars(vec3 d, Footprint fp, float omega0) {
 }
 
 vec3 sampleUniverseSky(vec3 d, vec3 a, vec3 b, float omega0) {
-    vec3 col = textureGrad(uUniCube, d, a, b).rgb;
+    vec3 col = textureGrad(uUniCube, d, a, b).rgb * uUniSkyScale;
     Footprint fp = makeFootprint(d, a, b, omega0);
     return col + universeStars(d, fp, omega0);
 }

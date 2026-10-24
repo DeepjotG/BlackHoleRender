@@ -40,6 +40,7 @@ struct FrameInput {
     bool universe = false;
     GLuint uniCube = 0, uniStars = 0, uniTiles = 0;
     float uniStarScale = 1.0f;
+    float uniSkyScale = 1.0f;     // exposure of the universe's diffuse light
     int uniTileGrid = 128;
     int debugView = 0;
 };

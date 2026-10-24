@@ -464,6 +464,7 @@ void App::frame() {
     fi.uniTiles = universe_.tileBuffer();
     fi.uniTileGrid = UniverseScene::kTileGrid;
     fi.uniStarScale = settings_.starBrightness * 15.0f;
+    fi.uniSkyScale = universe_.skyExposure();
     fi.time = static_cast<float>(std::fmod(simTime_, 3600.0));
     fi.diskTime = static_cast<float>(diskClock_);
     fi.dt = dt;

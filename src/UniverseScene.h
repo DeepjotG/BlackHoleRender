@@ -64,6 +64,9 @@ public:
 
     const std::vector<UniverseTarget>& targets() const { return targets_; }
     double nearestSurfaceM() const { return nearestSurfaceM_; }   // to stars / galaxy edges, M
+    // Exposure for the diffuse sky: 1 normally, lower inside very bright places (a galaxy's centre), so
+    // the sky keeps its structure and the black hole stays the brightest thing in view.
+    float skyExposure() const { return static_cast<float>(skyExposure_); }
     double julianDate(double simSeconds) const { return jd0_ + simSeconds / 86400.0; }
     std::string nearestName() const { return nearestName_; }
     // Nearest star other than the black hole (renderer frame), for the "Nearest star" button.
@@ -140,6 +143,8 @@ private:
     double galSurfaceM_ = 1e300, galCentreM_ = 1e300;
     std::string status_;
     double jd0_ = 0.0;           // Julian date when the simulation started (real universe)
+    double skyMean_ = 0.0;       // mean luminance of the last complete bake
+    double skyExposure_ = 1.0, skyExposureTarget_ = 1.0;
 };
 
 }  // namespace bhs
