@@ -8,18 +8,47 @@ out of the physics rather than from tricks. You can fly around freely.
 
 ![](docs/preview.png)
 
-## Build and run
+## Start it
+
+```bash
+cd /mnt/storage/BlackholeSimulation
+./run.sh                # builds what changed, then opens the window on the RTX 3060
+./run.sh --fullscreen   # same, fullscreen
+```
+
+`run.sh` always runs an incremental build first (it prints `ninja: no work to do.` when
+nothing changed), so edits and updates are picked up automatically. The very first build
+downloads GLFW 3.4, GLM, Dear ImGui, glad2 and stb. The mouse is captured for flying as soon
+as the window opens: press **Tab** (or Esc) to get the cursor back for the settings panel,
+and **Esc** again to quit. Run the physics checks with `ctest --test-dir build`.
+
+Manual build, if you prefer:
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build        # physics checks
-./run.sh                      # launches on the RTX 3060 when its driver is loaded
+./build/blackhole
 ```
 
-Dependencies (GLFW 3.4, GLM, Dear ImGui, glad2, stb) are fetched by CMake at configure
-time; the only system requirements are a C++20 compiler, CMake 3.24+, Python 3 with
-`jinja2` (for the OpenGL loader generator) and the X11/Wayland development headers.
+System requirements: a C++20 compiler, CMake 3.24+, Python 3 with `jinja2` (for the OpenGL
+loader generator), the X11/Wayland development headers and libEGL.
+
+### Which GPU renders, and how the picture reaches the screen
+
+The laptop's panel is wired to the Radeon iGPU, so frames rendered on the RTX 3060 have to be
+handed over to it. The app picks the route by itself:
+
+* **Wayland session with the NVIDIA driver loaded (the normal case here):** the window is a
+  native Wayland window on the iGPU, all rendering happens on the RTX 3060 in a headless EGL
+  context, and each finished frame is copied across with an asynchronous readback
+  (about 1.7 ms per 1080p frame). See `src/GpuBridge.cpp`.
+* **`--x11`, or an X11 session:** classic PRIME render offload through GLX. On this machine
+  XWayland's GPU acceleration fails to start (`Failed to initialize glamor, falling back to
+  sw` in the session log), so under Wayland this route is stuck at about 17 fps at 1080p.
+* **`--igpu`, or no NVIDIA driver:** everything on the Radeon.
+
+The log line `OpenGL 4.6.0 NVIDIA ... | NVIDIA GeForce RTX 3060 Laptop GPU` and the top of the
+settings panel show which GPU is rendering.
 
 ## Enabling the RTX 3060 (one-time)
 
@@ -29,16 +58,17 @@ Key was rejected by service`). Enroll it once:
 
 ```bash
 sudo mokutil --import /var/lib/shim-signed/mok/MOK.der   # choose a one-time password
+sudo mokutil --timeout -1                                # wait at the blue screen instead of a 10 s countdown
 sudo reboot
 # Blue "MOK management" screen: Enroll MOK -> Continue -> Yes -> password -> Reboot
 nvidia-smi                                               # must now list the RTX 3060
 ```
 
 Alternatively disable Secure Boot in the BIOS. Without this the app still runs on the
-Radeon iGPU (the first run starts on the Medium preset; the choice is saved in
-`settings.ini` next to this README); `run.sh` detects the driver automatically.
+Radeon iGPU (the first run then starts on the Medium preset; the choice is saved in
+`settings.ini` next to this README). The app detects the driver automatically.
 
-Optional desktop launcher:
+Optional desktop launcher (shows up in the app grid as *Black Hole Simulation*, starts fullscreen):
 
 ```bash
 install -Dm644 blackhole.desktop ~/.local/share/applications/blackhole.desktop
@@ -46,15 +76,17 @@ install -Dm644 blackhole.desktop ~/.local/share/applications/blackhole.desktop
 
 ## Performance
 
-Measured with `--benchmark` at a 1854x1011 window on the **Radeon iGPU** (the RTX 3060 is
-roughly five to six times faster, so expect High at well over 60 fps once its driver loads):
+Measured with `--benchmark`. RTX 3060 Laptop at 1920x1080 fullscreen (through the Wayland
+bridge, sustained clocks); Radeon iGPU in a 1854x1011 window:
 
-| Preset | Internal res | Steps | Disk | iGPU fps |
-|---|---|---|---|---|
-| Low | 50 % | 200 | thin | 162 |
-| Medium | 75 % | 300 | volumetric | 44 |
-| High (default) | 100 % | 450 | volumetric | 21 |
-| Ultra | 100 % | 700 | volumetric, fine | 14 |
+| Preset | Internal res | Steps | Disk | RTX 3060 fps | iGPU fps |
+|---|---|---|---|---|---|
+| Low | 50 % | 200 | thin | 322 | 162 |
+| Medium | 75 % | 300 | volumetric | 159 | 44 |
+| High (default) | 100 % | 450 | volumetric | 74 | 21 |
+| Ultra | 100 % | 700 | volumetric, fine | 49 | 14 |
+
+With VSync on (the default) the frame rate is capped by the 144 Hz panel.
 
 The renderer also supersamples progressively whenever the camera is still, so a paused view
 keeps sharpening for a few seconds on any preset. *Dynamic resolution* in the Quality panel
@@ -84,12 +116,25 @@ holds a target frame time by scaling the internal resolution.
 
 ```
 --preset low|medium|high|ultra   --bookmark N   --pos x,y,z --target x,y,z
---frames N --screenshot out.png  render N frames headlessly and save the last one
+--frames N --screenshot out.png  render N frames and save the last one (no UI)
 --cinematic out.png [--capture-size 3840x2160 --samples 24]
 --benchmark                      time every preset and print a table
---lensing 0|1  --disk none|thin|volumetric  --doppler 0..1  --debug steps|footprint
---fullscreen --width W --height H --wayland|--x11 --seed N --vsync 0|1
+--lensing 0|1  --disk none|thin|volumetric  --doppler 0..1  --debug steps|footprint|nan
+--fullscreen --width W --height H --seed N --vsync 0|1 --no-ui --no-capture
+--igpu                           render on the integrated GPU
+--x11 | --wayland                force a window system (see "Which GPU renders" above)
+--gl-debug                       print OpenGL driver errors and warnings
 ```
+
+## Troubleshooting
+
+* **Nothing appears:** start it from a terminal with `./run.sh` and read the `[bhs]` lines;
+  every failure prints a reason. `ERROR: no window system could provide an OpenGL 4.6 core
+  context` means neither Wayland nor X11 could open a window.
+* **It says it is on the integrated GPU:** check `nvidia-smi`. If it fails, the driver is not
+  loaded (see *Enabling the RTX 3060*).
+* **Low frame rate on the RTX 3060:** make sure you did not pass `--x11`, and that the laptop
+  is plugged in (the GPU's power limit drops on battery).
 
 ## How it works
 

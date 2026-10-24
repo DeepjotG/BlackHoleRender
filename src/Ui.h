@@ -15,6 +15,8 @@ struct UiContext {
     Renderer* renderer = nullptr;
     const char* gpuName = "";
     bool isNvidia = false;
+    bool nvidiaDriverLoaded = false;
+    bool bridged = false;
     float fps = 0.0f;
     double skyBakeMs = 0.0;
     int* debugView = nullptr;

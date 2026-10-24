@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
@@ -18,7 +19,7 @@ namespace bhs {
 
 namespace {
 
-void glfwErrorCb(int code, const char* desc) { logError("GLFW error {}: {}", code, desc); }
+void glfwErrorCb(int code, const char* desc) { logWarn("GLFW {}: {}", code, desc); }
 
 void APIENTRY glDebugCb(GLenum, GLenum type, GLuint id, GLenum severity, GLsizei, const GLchar* msg, const void*) {
     if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) return;
@@ -30,47 +31,120 @@ void APIENTRY glDebugCb(GLenum, GLenum type, GLuint id, GLenum severity, GLsizei
 
 App* App::self(GLFWwindow* w) { return static_cast<App*>(glfwGetWindowUserPointer(w)); }
 
+namespace {
+void setOffloadEnv() {
+    setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+    setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
+    setenv("__VK_LAYER_NV_optimus", "NVIDIA_only", 1);
+}
+void clearOffloadEnv() {
+    unsetenv("__NV_PRIME_RENDER_OFFLOAD");
+    unsetenv("__GLX_VENDOR_LIBRARY_NAME");
+    unsetenv("__VK_LAYER_NV_optimus");
+}
+// Restricting EGL to the NVIDIA vendor makes native Wayland windows fail outright.
+void dropNvidiaOnlyEgl() {
+    const char* egl = std::getenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+    if (egl && std::strstr(egl, "nvidia")) unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+}
+}  // namespace
+
+// Chooses the GPU and how its frames reach the screen, before any OpenGL vendor library is
+// resolved (glvnd reads the offload variables lazily, on the first GLX call for a screen).
+//   NvidiaBridge: native Wayland window on the display GPU, rendering on an NVIDIA EGL device
+//                 context (see GpuBridge). Fast on hybrid laptops under Wayland.
+//   NvidiaGlx:    PRIME render offload through GLX (X11 sessions, or --x11).
+//   Integrated:   whatever GPU drives the display.
+void App::selectGpu() {
+    std::error_code ec;
+    nvidiaDriver_ = std::filesystem::exists("/proc/driver/nvidia/version", ec);
+    dropNvidiaOnlyEgl();
+    if (opt_.igpu || !nvidiaDriver_) {
+        gpuPath_ = GpuPath::Integrated;
+        if (opt_.igpu) {
+            clearOffloadEnv();
+            logInfo("--igpu: using the integrated GPU");
+        }
+        return;
+    }
+    const bool haveWayland = std::getenv("WAYLAND_DISPLAY") != nullptr;
+    if (opt_.x11 || (!haveWayland && !opt_.wayland)) {
+        gpuPath_ = GpuPath::NvidiaGlx;
+        setOffloadEnv();
+        logInfo("NVIDIA driver detected: rendering on the discrete GPU (GLX offload)");
+    } else {
+        gpuPath_ = GpuPath::NvidiaBridge;
+        clearOffloadEnv();   // the window itself belongs to the display GPU
+        logInfo("NVIDIA driver detected: rendering on the discrete GPU, shown through a native Wayland window");
+    }
+}
+
+void App::setSwapInterval(int interval) {
+    if (bridge_.active()) bridge_.setSwapInterval(interval);
+    else glfwSwapInterval(interval);
+}
+
 bool App::initWindow() {
     glfwSetErrorCallback(glfwErrorCb);
-    // Native Wayland (EGL) by default when a compositor is present: XWayland's GLX often lacks DRI3
-    // and then cannot provide a hardware OpenGL 4.6 context.
+    selectGpu();
+
+    // Platform order. GLX offload needs X11 (XWayland); everything else prefers native Wayland,
+    // because XWayland's GLX may lack DRI3 and then has no fast hardware path at all.
     const bool haveWayland = std::getenv("WAYLAND_DISPLAY") != nullptr;
-    int platform = GLFW_PLATFORM_X11;
-    if (opt_.wayland || (haveWayland && !opt_.x11)) platform = GLFW_PLATFORM_WAYLAND;
-    glfwInitHint(GLFW_PLATFORM, platform);
-    if (!glfwInit()) {
-        logWarn("preferred window platform unavailable, trying any platform");
-        glfwInitHint(GLFW_PLATFORM, GLFW_ANY_PLATFORM);
+    std::vector<int> order;
+    if (gpuPath_ == GpuPath::NvidiaGlx || opt_.x11 || (!haveWayland && !opt_.wayland))
+        order = {GLFW_PLATFORM_X11, GLFW_PLATFORM_WAYLAND};
+    else
+        order = {GLFW_PLATFORM_WAYLAND, GLFW_PLATFORM_X11};
+
+    for (size_t attempt = 0; attempt < order.size() && !window_; ++attempt) {
+        const int platform = order[attempt];
+        const char* pname = platform == GLFW_PLATFORM_WAYLAND ? "Wayland" : "X11";
+        if (!glfwPlatformSupported(platform)) continue;
+        // Switching window system on a fallback also switches how the NVIDIA GPU is reached.
+        if (platform == GLFW_PLATFORM_X11 && gpuPath_ == GpuPath::NvidiaBridge) {
+            setOffloadEnv();
+            gpuPath_ = GpuPath::NvidiaGlx;
+        } else if (platform == GLFW_PLATFORM_WAYLAND && gpuPath_ == GpuPath::NvidiaGlx) {
+            clearOffloadEnv();
+            gpuPath_ = GpuPath::NvidiaBridge;
+        }
+        glfwInitHint(GLFW_PLATFORM, platform);
         if (!glfwInit()) {
-            logError("glfwInit failed");
-            return false;
+            logWarn("could not initialise the {} window system, trying the next one", pname);
+            continue;
         }
-    }
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 #ifndef NDEBUG
-    glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
+        glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 #else
-    if (opt_.glDebug) glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
+        if (opt_.glDebug) glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 #endif
-    GLFWmonitor* monitor = nullptr;
-    int w = opt_.width, h = opt_.height;
-    if (opt_.fullscreen) {
-        monitor = glfwGetPrimaryMonitor();
-        if (const GLFWvidmode* m = glfwGetVideoMode(monitor)) {
-            w = m->width;
-            h = m->height;
-            glfwWindowHint(GLFW_RED_BITS, m->redBits);
-            glfwWindowHint(GLFW_GREEN_BITS, m->greenBits);
-            glfwWindowHint(GLFW_BLUE_BITS, m->blueBits);
-            glfwWindowHint(GLFW_REFRESH_RATE, m->refreshRate);
+        GLFWmonitor* monitor = nullptr;
+        int w = opt_.width, h = opt_.height;
+        if (opt_.fullscreen) {
+            monitor = glfwGetPrimaryMonitor();
+            if (const GLFWvidmode* m = monitor ? glfwGetVideoMode(monitor) : nullptr) {
+                w = m->width;
+                h = m->height;
+                glfwWindowHint(GLFW_RED_BITS, m->redBits);
+                glfwWindowHint(GLFW_GREEN_BITS, m->greenBits);
+                glfwWindowHint(GLFW_BLUE_BITS, m->blueBits);
+                glfwWindowHint(GLFW_REFRESH_RATE, m->refreshRate);
+            }
+        }
+        window_ = glfwCreateWindow(w, h, "Black Hole Simulation", monitor, nullptr);
+        if (!window_) {
+            logWarn("could not open an OpenGL 4.6 window through {}{}", pname,
+                    attempt + 1 < order.size() ? ", trying the next window system" : "");
+            glfwTerminate();
         }
     }
-    window_ = glfwCreateWindow(w, h, "Black Hole Simulation", monitor, nullptr);
     if (!window_) {
-        logError("window creation failed (OpenGL 4.6 core context required)");
+        logError("no window system could provide an OpenGL 4.6 core context");
         return false;
     }
     glfwMakeContextCurrent(window_);
@@ -79,17 +153,35 @@ bool App::initWindow() {
         logError("failed to load OpenGL functions");
         return false;
     }
+#ifndef NDEBUG
+    const bool debugContext = true;
+#else
+    const bool debugContext = opt_.glDebug;
+#endif
+    if (gpuPath_ == GpuPath::NvidiaBridge && !bridge_.init(window_, debugContext)) {
+        logWarn("NVIDIA rendering bridge unavailable ({}); rendering on the integrated GPU", bridge_.error());
+        logWarn("Alternative: ./run.sh --x11 renders on the NVIDIA GPU through XWayland (slow if XWayland lacks DRI3)");
+        gpuPath_ = GpuPath::Integrated;
+    }
+    // From here on the current context is the one that renders (the NVIDIA one when bridged).
     const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     gpuName_ = renderer ? renderer : "unknown GPU";
     isNvidia_ = gpuName_.find("NVIDIA") != std::string::npos;
     logInfo("OpenGL {} | {}", version ? version : "?", gpuName_);
-    if (GLAD_VERSION_MAJOR(ver) * 10 + GLAD_VERSION_MINOR(ver) < 46) {
-        logError("OpenGL 4.6 is required, got {}.{}", GLAD_VERSION_MAJOR(ver), GLAD_VERSION_MINOR(ver));
+    GLint glMajor = 0, glMinor = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &glMajor);
+    glGetIntegerv(GL_MINOR_VERSION, &glMinor);
+    if (glMajor * 10 + glMinor < 46) {
+        logError("OpenGL 4.6 is required, got {}.{}", glMajor, glMinor);
         return false;
     }
-    if (!isNvidia_) {
-        logWarn("Not running on the NVIDIA GPU. Expect low frame rates; use the Low preset.");
+    if (bridge_.active()) logInfo("display: native Wayland window, frames copied from {} each frame", gpuName_);
+    if (!isNvidia_ && nvidiaDriver_ && !opt_.igpu) {
+        logWarn("The NVIDIA driver is loaded but this window renders on {}.", gpuName_);
+        logWarn("Launch with ./run.sh (without --igpu) to use the RTX 3060.");
+    } else if (!isNvidia_ && !nvidiaDriver_) {
+        logWarn("Not running on the NVIDIA GPU (its kernel module is not loaded). Expect lower frame rates.");
         logWarn("Fix: enroll the driver's Secure Boot key (README.md, 'Enabling the RTX 3060').");
     }
 #ifdef NDEBUG
@@ -102,7 +194,7 @@ bool App::initWindow() {
         glDebugMessageCallback(glDebugCb, nullptr);
     }
     vsyncApplied_ = settings_.vsync;
-    glfwSwapInterval(vsyncApplied_ ? 1 : 0);
+    setSwapInterval(vsyncApplied_ ? 1 : 0);
     glfwSetWindowUserPointer(window_, this);
     glfwSetKeyCallback(window_, [](GLFWwindow* win, int key, int, int action, int mods) { self(win)->onKey(key, action, mods); });
     glfwSetScrollCallback(window_, [](GLFWwindow* win, double, double dy) { self(win)->onScroll(dy); });
@@ -194,6 +286,7 @@ void App::shutdown() {
     renderer_.shutdown();
     sky_.shutdown();
     diskTex_.shutdown();
+    bridge_.shutdown();
     if (window_) glfwDestroyWindow(window_);
     glfwTerminate();
     window_ = nullptr;
@@ -306,7 +399,7 @@ void App::frame() {
     }
     if (settings_.vsync != vsyncApplied_) {
         vsyncApplied_ = settings_.vsync;
-        glfwSwapInterval(vsyncApplied_ ? 1 : 0);
+        setSwapInterval(vsyncApplied_ ? 1 : 0);
     }
 
     const std::string fp = settings_.traceFingerprint();
@@ -314,7 +407,10 @@ void App::frame() {
     lastFingerprint_ = fp;
     lastDebugView_ = debugView_;
 
+    targetFbo_ = bridge_.active() ? bridge_.backbuffer(fbW_, fbH_) : 0;
+
     FrameInput fi;
+    fi.targetFbo = targetFbo_;
     fi.camera = &camera_;
     fi.settings = &settings_;
     fi.time = static_cast<float>(simTime_);
@@ -343,13 +439,18 @@ void App::frame() {
     // Run the ImGui frame every frame so its input queue drains and the Want* flags stay current;
     // only the drawing is skipped when the panel is hidden.
     ui_.newFrame(mouseCaptured_);
-    if (settings_.showUi && !wantShot) {
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFbo_);
+    glViewport(0, 0, fbW_, fbH_);
+    // Screenshots are clean (no panel) unless an automated run asked for the panel with --ui.
+    if (settings_.showUi && (!wantShot || opt_.forceUi)) {
         UiContext ctx;
         ctx.settings = &settings_;
         ctx.camera = &camera_;
         ctx.renderer = &renderer_;
         ctx.gpuName = gpuName_.c_str();
         ctx.isNvidia = isNvidia_;
+        ctx.nvidiaDriverLoaded = nvidiaDriver_;
+        ctx.bridged = bridge_.active();
         ctx.fps = fps_;
         ctx.skyBakeMs = sky_.lastBakeMs();
         ctx.debugView = &debugView_;
@@ -370,10 +471,12 @@ void App::frame() {
         requestScreenshot_ = false;
         const std::string path = (lastFrame && !opt_.screenshot.empty()) ? opt_.screenshot
                                                                          : capture::timestampedPath(appRoot_ + "/screenshots", "blackhole");
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, targetFbo_);
         capture::savePngFromFramebuffer(path, fbW_, fbH_);
     }
 
-    glfwSwapBuffers(window_);
+    if (bridge_.active()) bridge_.present();
+    else glfwSwapBuffers(window_);
     ++frameIndex_;
     ++fpsFrames_;
     fpsTimer_ += dt;

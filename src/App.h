@@ -5,6 +5,7 @@
 
 #include "Camera.h"
 #include "DiskTextures.h"
+#include "GpuBridge.h"
 #include "Renderer.h"
 #include "Settings.h"
 #include "SkyBaker.h"
@@ -20,6 +21,7 @@ struct Options {
     bool wayland = false;
     bool x11 = false;
     bool glDebug = false;
+    bool igpu = false;
     bool noUi = false;
     bool forceUi = false;
     bool noCapture = false;
@@ -50,6 +52,8 @@ public:
 
 private:
     bool initWindow();
+    void selectGpu();
+    void setSwapInterval(int interval);
     void shutdown();
     void frame();
     void gatherInput(Camera::Input& in);
@@ -68,9 +72,14 @@ private:
     SkyBaker sky_;
     DiskTextures diskTex_;
     Ui ui_;
+    GLuint targetFbo_ = 0;   // final framebuffer: 0, or the bridge's backbuffer
 
     std::string gpuName_;
     bool isNvidia_ = false;
+    bool nvidiaDriver_ = false;   // NVIDIA kernel module loaded
+    enum class GpuPath { Integrated, NvidiaGlx, NvidiaBridge };
+    GpuPath gpuPath_ = GpuPath::Integrated;
+    GpuBridge bridge_;
     bool mouseCaptured_ = false;
     bool firstMouse_ = true;
     glm::dvec2 lastCursor_{0.0};

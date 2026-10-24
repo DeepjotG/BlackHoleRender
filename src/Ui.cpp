@@ -83,7 +83,14 @@ void Ui::draw(UiContext& c) {
 
     // ---- stats ----
     ImGui::TextUnformatted(c.gpuName);
-    if (!c.isNvidia) {
+    if (c.bridged) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(shown via the iGPU's Wayland window)");
+    }
+    if (!c.isNvidia && c.nvidiaDriverLoaded) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+                           "Integrated GPU in use. Start with ./run.sh (without --igpu) for the RTX 3060.");
+    } else if (!c.isNvidia) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
                            "Not running on the RTX 3060. Enroll the driver's Secure Boot key (README, 'Enabling the RTX 3060').");
     }

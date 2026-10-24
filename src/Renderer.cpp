@@ -396,7 +396,7 @@ void Renderer::render(const FrameInput& in) {
     upscalePass(in, *hdrInternal, upscaled_);
     bloomPass(in, upscaled_);
     updateAutoExposure(in, upscaled_);
-    compositePass(in, upscaled_, 0, in.windowW, in.windowH);
+    compositePass(in, upscaled_, in.targetFbo, in.windowW, in.windowH);
 
     endTimer();
     accumCount_ = std::min(accumCount_ + 1, 1 << 20);

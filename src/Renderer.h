@@ -20,6 +20,7 @@ struct FrameInput {
     GLuint skyCubemap = 0, noise3d = 0, blackbodyLut = 0;
     bool resetAccumulation = false;
     bool diskAnimating = true;
+    GLuint targetFbo = 0;   // final framebuffer (0 = window)
     int debugView = 0;
 };
 

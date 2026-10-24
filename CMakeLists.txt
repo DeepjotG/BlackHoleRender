@@ -71,6 +71,10 @@ add_library(stb INTERFACE)
 target_include_directories(stb INTERFACE ${stb_SOURCE_DIR})
 
 find_package(OpenGL REQUIRED)
+# libEGL (glvnd) for the NVIDIA rendering bridge; found directly because FindOpenGL's EGL
+# component insists on libOpenGL.so, which is not installed by default.
+find_library(BHS_EGL_LIBRARY NAMES EGL REQUIRED)
+find_path(BHS_EGL_INCLUDE_DIR EGL/egl.h REQUIRED)
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------- core library (shared by app and tests)
@@ -91,8 +95,10 @@ add_executable(blackhole
   src/DiskTextures.cpp
   src/Ui.cpp
   src/Capture.cpp
+  src/GpuBridge.cpp
   src/stb_impl.cpp)
-target_link_libraries(blackhole PRIVATE bhs_core glad_gl_core_46 glfw imgui stb OpenGL::GL Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(blackhole PRIVATE bhs_core glad_gl_core_46 glfw imgui stb OpenGL::GL ${BHS_EGL_LIBRARY} Threads::Threads ${CMAKE_DL_LIBS})
+target_include_directories(blackhole PRIVATE ${BHS_EGL_INCLUDE_DIR})
 target_compile_definitions(blackhole PRIVATE
   BHS_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders"
   BHS_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets")

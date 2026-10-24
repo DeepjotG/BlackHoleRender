@@ -12,7 +12,9 @@ void usage() {
         "blackhole [options]\n"
         "  --width N --height N     window size (default 1600x900)\n"
         "  --fullscreen             borderless fullscreen on the primary monitor\n"
-        "  --wayland | --x11        window platform (default: Wayland when available)\n"
+        "  --wayland | --x11        window system (default: native Wayland when available; with the\n"
+        "                           NVIDIA driver loaded, --x11 uses GLX offload through XWayland)\n"
+        "  --igpu                   render on the integrated GPU even when the NVIDIA driver is loaded\n"
         "  --preset low|medium|high|ultra\n"
         "  --bookmark N             start at bookmark 1-4\n"
         "  --pos x,y,z              camera position (M units); --target x,y,z look-at point\n"
@@ -23,7 +25,8 @@ void usage() {
         "  --lensing 0|1  --disk none|thin|volumetric  --doppler F  --exposure F  --time SEC\n"
         "  --debug steps|footprint  diagnostic views\n"
         "  --seed N                 sky seed\n"
-        "  --vsync 0|1  --no-ui  --ui  --no-capture  --gl-debug\n"
+        "  --vsync 0|1  --no-ui  --no-capture  --gl-debug\n"
+        "  --ui                     show the panel in automated runs, including their screenshots\n"
         "  --shaders DIR            shader directory (default: source tree)\n"
         "  --settings FILE          settings file (default settings.ini)\n");
 }
@@ -54,6 +57,7 @@ int main(int argc, char** argv) {
         else if (a == "--wayland") o.wayland = true;
         else if (a == "--x11") o.x11 = true;
         else if (a == "--gl-debug") o.glDebug = true;
+        else if (a == "--igpu") o.igpu = true;
         else if (a == "--preset") {
             const std::string p = next();
             if (p == "low" || p == "0") o.preset = bhs::PRESET_LOW;
