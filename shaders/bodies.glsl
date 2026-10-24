@@ -106,6 +106,16 @@ struct Surface {
     vec3 atmoColor;
 };
 
+// Swirling cloud cover that drifts slowly over the ground: fbm through a domain warp, which curls the
+// cloud bands into eddies and cyclones. Returns raw noise (about -1..1); callers threshold it.
+float planetClouds(vec3 p, uint seed, float scale) {
+    float a = uTime * 0.004;   // drift around the spin axis (local y)
+    float ca = cos(a), sa = sin(a);
+    vec3 q = vec3(ca * p.x - sa * p.z, p.y, sa * p.x + ca * p.z);
+    vec3 w = vec3(fbm3(q * 1.7, 3, 0.5, seed + 21u), fbm3(q * 1.7 + 4.1, 3, 0.5, seed + 22u), fbm3(q * 1.7 + 8.3, 3, 0.5, seed + 23u));
+    return fbm3(q * scale + w * 1.4, 6, 0.55, seed + 8u);
+}
+
 Surface planetSurface(Body b, vec3 n) {
     vec3 p = bodyLocal(b, n);
     int look = int(b.look.x + 0.5);
@@ -126,7 +136,10 @@ Surface planetSurface(Body b, vec3 n) {
         s.albedo = mix(deep, crest, smoothstep(0.55, 0.95, bands) * 0.8 + 0.2 * detail);
         float foam = smoothstep(0.9, 0.99, bands) * smoothstep(0.0, 0.5, detail) * lodFade(20.0);
         s.albedo = mix(s.albedo, vec3(0.8), foam * 0.6);
-        float cloud = smoothstep(0.25, 0.7, fbm3(p * 4.0 + 13.0, 5, 0.55, seed + 9u));
+        vec3 sunLocal = bodyLocal(b, normalize(b.light.xyz));
+        float cloud = smoothstep(0.25, 0.7, planetClouds(p, seed + 9u, 4.0));
+        float shade = smoothstep(0.25, 0.7, planetClouds(normalize(p + sunLocal * 0.025), seed + 9u, 4.0));
+        s.albedo *= 1.0 - 0.4 * shade;   // cloud shadows on the sea
         s.albedo = mix(s.albedo, vec3(0.9), cloud * 0.55);
         s.specular = 0.8 * (1.0 - cloud);
         s.roughness = 0.25;
@@ -164,7 +177,10 @@ Surface planetSurface(Body b, vec3 n) {
         vec3 ground = mix(vec3(0.10, 0.22, 0.07), vec3(0.42, 0.35, 0.22), smoothstep(-0.2, 0.4, dry + 0.6 * (1.0 - abs(lat) * 1.6)));
         s.albedo = mix(ocean, ground, coast);
         s.albedo = mix(s.albedo, vec3(0.92, 0.94, 0.97), smoothstep(0.78, 0.86, abs(lat) + 0.08 * land));
-        float cloud = smoothstep(0.1, 0.6, fbm3(p * 3.5 + 5.0, 6, 0.55, seed + 8u));
+        vec3 sunLocal = bodyLocal(b, normalize(b.light.xyz));
+        float cloud = smoothstep(0.1, 0.6, planetClouds(p, seed, 3.5));
+        float shade = smoothstep(0.1, 0.6, planetClouds(normalize(p + sunLocal * 0.025), seed, 3.5));
+        s.albedo *= 1.0 - 0.45 * shade;  // cloud shadows on land and sea
         s.albedo = mix(s.albedo, vec3(0.95), cloud * 0.8);
         s.specular = 0.7 * (1.0 - coast) * (1.0 - cloud);
         s.roughness = 0.3;
