@@ -242,7 +242,10 @@ vec3 shadeBodySurface(Body b, vec3 n, vec3 viewDir) {
         float faculae = (1.0 - mu) * smoothstep(0.2, 0.5, sg) * 0.25 * cool;   // bright patches near the limb
         float tLocal = teff * (0.84 + 0.16 * pow(mu, 0.4)) * (1.0 - 0.2 * spot - 0.2 * umbra) * (0.98 + 0.04 * sg);
         float I = b.light.w * limb * gran * (1.0 - 0.5 * spot - 0.4 * umbra) * (1.0 + faculae);
-        return blackbody(tLocal).rgb * I;
+        // Normalise by the brightest channel of the star's colour (not its luminance), so red and blue
+        // stars keep their colour instead of washing out to cream in the tone mapper's highlights.
+        vec3 base = blackbody(teff).rgb;
+        return blackbody(tLocal).rgb * (I / max(max(base.r, max(base.g, base.b)), 1e-3));
     }
     Surface s = planetSurface(b, n);
     vec3 L = normalize(b.light.xyz);

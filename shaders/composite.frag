@@ -33,6 +33,13 @@ vec3 agx(vec3 val) {
     val = (val - min_ev) / (max_ev - min_ev);
     return agxDefaultContrastApprox(val);
 }
+// AgX "look": a gentle saturation in AgX space, where it survives the curve's highlight compression,
+// so coloured stars, nebulae and galaxy arms keep their colour while near-white light (the disk) is
+// left alone.
+vec3 agxLook(vec3 val) {
+    float luma = dot(val, vec3(0.2126, 0.7152, 0.0722));
+    return luma + 1.2 * (val - luma);
+}
 vec3 agxEotf(vec3 val) {
     const mat3 agx_mat_inv = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438,
                                   -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
@@ -68,7 +75,7 @@ void main() {
     hdr = max(mix(vec3(l), hdr, uSaturation), 0.0);
 
     vec3 c;
-    if (uTonemap == 0) c = agxEotf(agx(hdr));
+    if (uTonemap == 0) c = agxEotf(agxLook(agx(hdr)));
     else if (uTonemap == 1) c = acesFitted(hdr);
     else if (uTonemap == 2) c = hdr / (1.0 + hdr);
     else c = hdr;

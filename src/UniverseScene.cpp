@@ -793,7 +793,7 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
         b.pos = toRenderer(st.pos);
         b.radius = rM;
         b.teff = st.teff;
-        b.lightIntensity = 2.6f;   // bright enough to bloom, dim enough to keep the surface's detail
+        b.lightIntensity = 1.5f;   // bright enough to glow, dim enough to keep the colour and the detail
         b.atmosphere = static_cast<float>(std::clamp(70.0 / std::sqrt(std::max(static_cast<double>(st.radiusSolar), 1e-3)), 5.0, 90.0));
         b.seed = static_cast<uint32_t>(best[k].i % 4096u);
         b.info = "star";
