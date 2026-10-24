@@ -128,10 +128,13 @@ The *Universe* panel switches between three skies:
   star, a white dwarf, a binary...). Satellite galaxies, a big neighbour spiral and ~29,000
   galaxies in clusters, groups and filaments fill the universe. You can fly into any of them, or
   look at your own galaxy from outside.
-* **Real 3D universe:** real stars from the HYG catalogue, real galaxies from galaxy surveys, a model
-  of the Milky Way and the solar system's planets at today's positions. The black hole is
-  Sagittarius A* at the centre of the Milky Way (with its real mass, 4.3 million suns), or a
-  fictional Gargantua placed near the Sun so the real constellations surround it.
+* **Real 3D universe:** 119,613 real stars from the HYG catalogue, a model of the Milky Way and the
+  solar system's planets at today's positions. The black hole is Sagittarius A* at the centre of the
+  Milky Way (with its real mass, 4.3 million suns), or a fictional Gargantua placed near the Sun so
+  the real constellations surround it. About 30,000 real galaxies (the Local Group, the Updated
+  Nearby Galaxy Catalog and the 2MASS Redshift Survey, with Andromeda, M81, M51...) come from
+  tables that may not be redistributed, so they are downloaded once on your machine:
+  `python3 tools/fetch_real_catalogs.py` (a few minutes; see `assets/real/README.md`).
 
 How it is drawn: the stars are projected from the camera every frame on the GPU and looked up by
 the ray tracer through the same lensing-aware math as before, so real stars stretch into arcs
@@ -160,9 +163,11 @@ The gas is rendered with the same lensing as everything else.
 * **Penetration (beta)** sets how deep the orbit dives (pericentre = tidal radius / beta).
 * **Auto time warp** keeps the event watchable: the fall-in takes days to centuries of simulated
   time depending on the scenario, and the debris keeps returning for much longer.
-* **The camera** rides along with the star as it falls in (the black hole looming ahead), stays
-  with the debris through pericentre, then pulls back to show the stream and the forming disk
-  around the hole. Fly or look around at any time to take over.
+* **The camera** rides along with the star as it falls in, the black hole looming behind it; once
+  the star is torn apart it swings above the orbit to show the stretching debris side-on next to
+  the hole, pulls back while the stream flies off, and comes in close when the bound debris falls
+  back and wraps the hole in a glowing, lensed cocoon of hot gas. Fly or look around at any time to
+  take over.
 * **The steady accretion disk fades out** during an event (a real disruption happens around a quiet
   black hole and builds its own disk from the debris); tick *Keep the steady disk* to keep it.
 * **Gas brightness and opacity** (Quality panel) scale the debris' glow and absorption.
