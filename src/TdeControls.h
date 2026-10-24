@@ -44,7 +44,7 @@ struct TdeControls {
     double inclinationDeg = 25.0;
     double longitudeDeg = 200.0;
     bool retrograde = false;
-    int particles = 131072;
+    int particles = 262144;
     bool spawnRequested = false;
     bool clearRequested = false;
     bool watchRequested = false;   // move the camera to a viewpoint that frames the event

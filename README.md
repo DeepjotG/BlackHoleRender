@@ -174,7 +174,7 @@ The gas is rendered with the same lensing as everything else.
 * **Gas brightness and opacity** (Quality panel) scale the debris' glow and absorption.
 
 How it is simulated: until it reaches about twice the tidal radius the star moves rigidly on an
-exact Schwarzschild orbit; then it becomes 131,072 particles (a polytrope in hydrostatic balance)
+exact Schwarzschild orbit; then it becomes 262,144 particles (a polytrope in hydrostatic balance)
 whose pressure, shock heating, cooling and self-gravity are computed on nested 64^3 grids around
 the star and the hole, with general-relativistic orbits for every particle and accretion at the
 horizon. The grids are ray-marched into the same lensed image as everything else.

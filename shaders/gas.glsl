@@ -13,7 +13,7 @@ uniform float uGasRes[GAS_MAX];     // texels per edge
 uniform float uGasBrightness;       // artistic emission scale
 uniform float uGasOpacity;          // artistic absorption scale
 uniform int uGasLive[GAS_MAX];      // 0: the volume holds (almost) nothing and is not worth marching into
-uniform float uGasRefLen;           // M: one length for every volume (8 star radii), so the same gas looks
+uniform float uGasRefLen;           // M: one length for every volume (40 star radii), so the same gas looks
                                     // the same in every grid and nothing changes where grids hand over
 
 // Cell size (M) of the finest volume containing p, or 0 when p is outside every volume.
