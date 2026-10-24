@@ -648,7 +648,10 @@ void UniverseScene::bakeChunk(int step) {
 }
 
 void UniverseScene::refreshGalaxyDistances(const glm::dvec3& camGal) {
-    if (glm::length(camGal - galDistAt_) < 0.01 * std::min(galSurfaceM_ > 0.0 ? galSurfaceM_ : galCentreM_, galCentreM_)) return;
+    // Refresh after moving 1% of the distances (at least a parsec: at a galaxy's centre the distance
+    // to it is ~0, and the scan must not then run every frame).
+    const double scale = std::min(galSurfaceM_ > 0.0 ? galSurfaceM_ : galCentreM_, galCentreM_);
+    if (glm::length(camGal - galDistAt_) < std::max(0.01 * scale, units::kParsec)) return;
     galDistAt_ = camGal;
     galCentreM_ = glm::length(camGal - content_.host.center);
     galSurfaceM_ = 1e300;
