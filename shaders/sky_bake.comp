@@ -1,0 +1,168 @@
+#version 460 core
+// Procedural deep-space backdrop baked into a cubemap: Milky Way band with dust lanes,
+// a few large nebulae, and thousands of spiral / elliptical galaxies binned per tile.
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(r11f_g11f_b10f, binding = 0) uniform writeonly imageCube uCube;
+
+struct Galaxy {
+    vec4 dirCosR;   // xyz direction, w = cos(angular radius)
+    vec4 frame;     // xyz major axis (tangent), w = axis ratio
+    vec4 color;     // rgb tint, a = radiance
+    vec4 params;    // x type, y arms, z pitch, w seed
+    vec4 cpuOnly;
+};
+layout(std430, binding = 0) readonly buffer Galaxies { Galaxy gal[]; };
+layout(std430, binding = 1) readonly buffer Tiles { uint tileRange[]; };   // start, count per tile
+layout(std430, binding = 2) readonly buffer Indices { uint galIndex[]; };
+
+uniform int uRes;
+uniform int uFace;
+uniform int uRow0;
+uniform uint uSeed;
+uniform int uTileGrid;
+uniform float uMilkyWay;
+uniform float uNebula;
+uniform vec3 uGalacticNorth;
+uniform vec3 uGalacticCentre;
+
+vec3 cubeDir(int face, float u, float v) {
+    if (face == 0) return normalize(vec3(1.0, -v, -u));
+    if (face == 1) return normalize(vec3(-1.0, -v, u));
+    if (face == 2) return normalize(vec3(u, 1.0, v));
+    if (face == 3) return normalize(vec3(u, -1.0, -v));
+    if (face == 4) return normalize(vec3(u, -v, 1.0));
+    return normalize(vec3(-u, -v, -1.0));
+}
+
+float sersic(float rho, float re, float n) {
+    float bn = 2.0 * n - 1.0 / 3.0;
+    return exp(-bn * (pow(max(rho, 1e-5) / re, 1.0 / n) - 1.0));
+}
+
+vec3 galaxyRadiance(Galaxy g, vec3 d) {
+    vec3 c = g.dirCosR.xyz;
+    float cosA = dot(d, c);
+    if (cosA < g.dirCosR.w) return vec3(0.0);
+    float R = acos(g.dirCosR.w);
+    vec3 off = d / max(cosA, 1e-4) - c;          // gnomonic projection onto the tangent plane
+    vec3 u = g.frame.xyz;
+    vec3 w = cross(c, u);
+    float tanR = tan(R);
+    float ex = dot(off, u) / tanR;
+    float ey = dot(off, w) / (tanR * g.frame.w);
+    float rho = sqrt(ex * ex + ey * ey);
+    if (rho > 1.0) return vec3(0.0);
+    float type = g.params.x;
+    float seed = g.params.w;
+    vec3 col;
+    if (type < 0.5) {
+        float I = sersic(rho, 0.22, 4.0);
+        col = g.color.rgb * I;
+    } else {
+        float bulge = sersic(rho, 0.07, 2.5) * 0.9;
+        float disk = exp(-rho / 0.28);
+        float theta = atan(ey, ex);
+        float pitch = g.params.z;
+        float arms = g.params.y;
+        float phase = log(max(rho, 1e-3)) / pitch;
+        float armPattern = 0.5 + 0.5 * cos(arms * (theta - phase) + seed);
+        armPattern = pow(armPattern, 3.0) * smoothstep(0.03, 0.15, rho);
+        float n1 = gnoise3(vec3(ex, ey, seed) * 9.0, 31u);
+        float n2 = gnoise3(vec3(ex, ey, seed) * 23.0, 57u);
+        float armMod = mix(0.3, 1.0, armPattern) * (0.85 + 0.45 * n1 + 0.2 * n2);
+        vec3 diskCol = mix(g.color.rgb, vec3(0.62, 0.74, 1.0), 0.55 * armPattern);
+        float knots = smoothstep(0.45, 0.85, n2) * armPattern;
+        vec3 hii = vec3(1.0, 0.45, 0.62) * knots * 0.9;
+        col = vec3(1.0, 0.86, 0.62) * bulge + (diskCol * armMod + hii) * disk;
+        if (type > 1.5) {
+            float bar = exp(-pow(ey / 0.06, 2.0)) * exp(-pow(ex / 0.3, 2.0));
+            col += vec3(1.0, 0.88, 0.68) * bar * 0.7;
+        }
+        // Dust lane on the near side of inclined disks.
+        float dust = (1.0 - g.frame.w) * smoothstep(-0.05, 0.12, ey) * smoothstep(0.35, 0.08, abs(ey)) * disk;
+        col *= 1.0 - 0.55 * dust;
+    }
+    col *= smoothstep(1.0, 0.75, rho);
+    return col * g.color.a;
+}
+
+vec3 milkyWay(vec3 d) {
+    vec3 e2 = cross(uGalacticNorth, uGalacticCentre);
+    float lat = asin(clamp(dot(d, uGalacticNorth), -1.0, 1.0));
+    float lon = atan(dot(d, e2), dot(d, uGalacticCentre));
+    float coreLon = exp(-pow(lon / 1.25, 2.0));
+    float band = exp(-pow(lat / 0.17, 2.0)) * (0.3 + 0.7 * coreLon);
+    float bulge = exp(-pow(lat / 0.12, 2.0) - pow(lon / 0.35, 2.0)) * 1.6;
+    // Cloudy structure with domain warping.
+    vec3 p = d * 6.0;
+    vec3 warp = vec3(fbm3(p + 3.1, 4, 0.5, 101u), fbm3(p + 7.7, 4, 0.5, 103u), fbm3(p + 1.3, 4, 0.5, 107u));
+    float clouds = fbm3(p * 1.3 + warp * 1.2, 7, 0.55, 109u);
+    float fine = fbm3(d * 60.0, 3, 0.5, 113u);
+    float structure = 0.55 + 0.9 * clouds + 0.25 * fine;
+    // Dark dust lanes hugging the plane.
+    float dustN = fbm3(d * 9.0 + warp * 0.8, 6, 0.55, 131u);
+    float dust = smoothstep(0.08, 0.42, dustN) * exp(-pow(lat / 0.06, 2.0));
+    float I = (band * structure + bulge * (0.6 + 0.5 * clouds)) * (1.0 - 0.85 * dust);
+    vec3 warm = vec3(1.0, 0.82, 0.62);
+    vec3 cool = vec3(0.72, 0.80, 1.0);
+    vec3 col = mix(cool, warm, clamp(coreLon * 0.8 + 0.3 * clouds, 0.0, 1.0));
+    // Reddish glow of HII regions along the plane.
+    float hii = smoothstep(0.35, 0.7, fbm3(d * 14.0 + 5.0, 4, 0.5, 137u)) * exp(-pow(lat / 0.1, 2.0));
+    col = mix(col, vec3(1.0, 0.55, 0.5), 0.45 * hii);
+    return col * max(I, 0.0) * 0.045 * uMilkyWay;
+}
+
+vec3 nebulae(vec3 d) {
+    vec3 total = vec3(0.0);
+    for (int i = 0; i < 5; ++i) {
+        uint s = uSeed * 7919u + uint(i) * 1013u;
+        vec3 h = hash3u(uvec3(s, s * 3u + 1u, s * 5u + 2u));
+        vec3 h2 = hash3u(uvec3(s * 11u + 3u, s * 13u + 4u, s * 17u + 5u));
+        vec3 c = normalize(h * 2.0 - 1.0);
+        float R = radians(9.0 + 16.0 * h2.x);
+        float ang = acos(clamp(dot(d, c), -1.0, 1.0));
+        if (ang > R * 1.6) continue;
+        vec3 p = d * (3.0 + 2.0 * h2.y) + vec3(float(i) * 13.7);
+        vec3 warp = vec3(fbm3(p * 1.7 + 11.0, 4, 0.5, 201u + uint(i)), fbm3(p * 1.7 + 23.0, 4, 0.5, 211u + uint(i)),
+                         fbm3(p * 1.7 + 37.0, 4, 0.5, 223u + uint(i)));
+        float n = fbm3(p * 2.2 + warp * 1.8, 7, 0.55, 233u + uint(i));
+        float n2 = fbm3(p * 5.0 - warp, 5, 0.5, 241u + uint(i));
+        float fall = exp(-pow(ang / R, 2.0) * 1.6);
+        float dens = smoothstep(-0.15, 0.55, n + 0.3 * n2) * fall;
+        vec3 palA = mix(vec3(1.0, 0.35, 0.45), vec3(0.35, 0.65, 1.0), h2.z);
+        vec3 palB = mix(vec3(0.95, 0.6, 0.3), vec3(0.3, 0.9, 0.8), h.y);
+        vec3 col = mix(palA, palB, clamp(0.5 + 0.9 * n2, 0.0, 1.0));
+        // Dark filaments.
+        float dark = smoothstep(0.1, 0.5, fbm3(p * 4.0 + 61.0, 5, 0.5, 251u + uint(i)));
+        total += col * dens * (1.0 - 0.6 * dark * fall) * 0.09;
+    }
+    return total * uNebula;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy) + ivec2(0, uRow0);
+    if (px.x >= uRes || px.y >= uRes) return;
+    float u = (float(px.x) + 0.5) / float(uRes) * 2.0 - 1.0;
+    float v = (float(px.y) + 0.5) / float(uRes) * 2.0 - 1.0;
+    vec3 d = cubeDir(uFace, u, v);
+
+    vec3 col = milkyWay(d) + nebulae(d);
+
+    // Galaxies in this texel's tile.
+    int tx = int(float(px.x) * float(uTileGrid) / float(uRes));
+    int ty = int(float(px.y) * float(uTileGrid) / float(uRes));
+    int tile = (uFace * uTileGrid + ty) * uTileGrid + tx;
+    uint start = tileRange[tile * 2 + 0];
+    uint count = tileRange[tile * 2 + 1];
+    for (uint k = 0u; k < count; ++k) {
+        col += galaxyRadiance(gal[galIndex[start + k]], d);
+    }
+
+    // Faint diffuse background (unresolved galaxies / zodiacal-free deep sky).
+    col += vec3(0.0022, 0.0024, 0.0030) * (0.7 + 0.6 * fbm3(d * 4.0, 3, 0.5, 301u));
+
+    if (any(isnan(col))) col = vec3(0.0);
+    imageStore(uCube, ivec3(px, uFace), vec4(max(col, 0.0), 1.0));
+}

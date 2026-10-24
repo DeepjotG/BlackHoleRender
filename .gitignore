@@ -1,0 +1,8 @@
+build/
+build-*/
+.cache/
+*.png
+!assets/*.png
+settings.ini
+imgui.ini
+compile_commands.json

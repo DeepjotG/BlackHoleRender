@@ -1,0 +1,27 @@
+#version 460 core
+// Bakes a tileable 3D fbm noise texture used by the volumetric accretion disk.
+#include "common.glsl"
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+layout(r16f, binding = 0) uniform writeonly image3D uOut;
+uniform int uSize;
+uniform uint uSeed;
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID.xyz);
+    if (any(greaterThanEqual(p, ivec3(uSize)))) return;
+    vec3 uvw = (vec3(p) + 0.5) / float(uSize);
+    const int basePeriod = 4;
+    float sum = 0.0, amp = 0.55, norm = 0.0;
+    int period = basePeriod;
+    for (int o = 0; o < 6; ++o) {
+        sum += amp * pgnoise3(uvw * float(period), period, uSeed + uint(o) * 131u);
+        norm += amp;
+        amp *= 0.55;
+        period *= 2;
+    }
+    float n = clamp(0.5 + 0.5 * (sum / norm) * 1.6, 0.0, 1.0);
+    // Ridged touch for filamentary structure.
+    float ridge = 1.0 - abs(pgnoise3(uvw * float(basePeriod * 2), basePeriod * 2, uSeed + 977u));
+    n = mix(n, n * ridge * 1.3, 0.35);
+    imageStore(uOut, p, vec4(n, 0.0, 0.0, 0.0));
+}
