@@ -7,20 +7,22 @@
 //     adiabat, pressure acceleration. The particle carries u itself (not its entropy), so moving
 //     between grids of different resolution, which see different densities, does not change it.
 //  2. Sub-cycled kick-drift-kick in proper time: black hole gravity, monopole self-gravity around the
-//     moving core and the (constant) pressure acceleration. Same step rule as TdePhysics.h.
-//  3. Accretion (r < 2.05 M), escape, non-finite guard, statistics.
+//     moving core (while gas is bound to a core, see TdeSim.cpp) and the (constant) pressure
+//     acceleration. Same step rule as TdePhysics.h.
+//  3. Accretion (r < 2.05 M), escape, non-finite guard, statistics. The bound fraction classifies the
+//     gas of a self-bound core (while uInfo.w = 1) by the core's orbital energy, all other gas by its own.
 #include "tde_common.glsl"
 
 layout(local_size_x = 256) in;
 
 shared uint shDt[NDT];
-shared uint shCount[6];     // active, bound, accreted, escaped, nan, capped
+shared uint shCount[7];     // active, bound, accreted, escaped, nan, capped, substeps
 shared float shDiss[256];
 
 void main() {
     uint lid = gl_LocalInvocationID.x;
     for (uint b = lid; b < uint(NDT); b += 256u) shDt[b] = 0u;
-    if (lid < 6u) shCount[lid] = 0u;
+    if (lid < 7u) shCount[lid] = 0u;
     barrier();
 
     uint i = gl_GlobalInvocationID.x;
@@ -107,7 +109,7 @@ void main() {
         }
 
         // ---------------------------------------------------------------- sub-cycle
-        bool sg = uMono.z > 0.5 && cPos.w > 0.5;
+        bool sg = uMono.z > 0.5 && cPos.w > 0.5 && uExtra.z > 0.0;
         int maxSub = int(uStep.z);
         float tsg = 1e30;
         vec3 aS = sg ? selfGravity(x, coreAt(0.0), tsg) : vec3(0.0);
@@ -117,7 +119,9 @@ void main() {
         float t = 0.0;
         int fate = 0;
         bool capped = false;
+        uint substeps = 0u;
         for (int k = 0; k < 256 && remaining > 0.0; ++k) {
+            ++substeps;
             float rr = length(x);
             float L2 = angMom2(x, v);
             float lp = lapseOf(x, v);
@@ -161,12 +165,19 @@ void main() {
         if (fate == 2 || fate == 3) atomicAdd(shCount[3], 1u);
         if (fate == 3) atomicAdd(shCount[4], 1u);
         if (capped) atomicAdd(shCount[5], 1u);
+        if (lastStep) atomicAdd(shCount[6], substeps);
         if (fate == 0 && lastStep) {
             atomicAdd(shCount[0], 1u);
-            // Gas of a self-bound core shares the core's orbit; its own internal motion must not flip
-            // it between bound and unbound.
-            vec3 vOrbit = (sg && length(x - cPos.xyz) < uMono.w) ? cVel.xyz : v;
-            if (bh && specificEnergy(x, vOrbit) < 1.0) atomicAdd(shCount[1], 1u);
+            // While a self-bound core exists (uInfo.w = 1, decided on the CPU), the gas bound to it moves
+            // with it: it counts as bound to the hole if the core is (the core's state at the end of this
+            // step), so that internal motions and its extent do not split a remnant between bound and
+            // unbound. All other gas is classified by its own orbital energy.
+            vec3 xo = x, vo = v;
+            if (uInfo.w == 1 && uMono.z > 0.5 && cPos.w > 0.5 && boundToCore(x - cTraj[TRAJ].xyz, v - cEndVel.xyz)) {
+                xo = cTraj[TRAJ].xyz;
+                vo = cEndVel.xyz;
+            }
+            if (bh && specificEnergy(xo, vo) < 1.0) atomicAdd(shCount[1], 1u);
             int bin = clamp(int(floor(2.0 * log2(max(dtReq, 1e-30)))) + 64, 0, NDT - 1);
             atomicAdd(shDt[bin], 1u);
         }
@@ -198,6 +209,7 @@ void main() {
         if (shCount[3] != 0u) atomicAdd(sWords[S_ESCAPED], shCount[3]);
         if (shCount[4] != 0u) atomicAdd(sWords[S_NAN], shCount[4]);
         if (shCount[5] != 0u) atomicAdd(sWords[S_CAPPED], shCount[5]);
+        if (shCount[6] != 0u) atomicAdd(sWords[S_SUBSTEPS], shCount[6]);
         float dsum = min(shDiss[0], 4.0e18);
         if (dsum >= 1.0) {
             uint hi = uint(dsum * 2.3283064365386963e-10);

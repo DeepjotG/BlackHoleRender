@@ -6,7 +6,7 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 uniform sampler3D uSrc;
 uniform int uRes;
 uniform int uSlot;
-uniform float uTexel;     // texel size, M
+uniform float uRefLen;    // the renderer's reference length (M), the same for every volume
 layout(std430, binding = 6) buffer Peaks { uint peaks[]; };
 
 void main() {
@@ -15,7 +15,7 @@ void main() {
     // Visual weight: optical depth, or for thin gas how brightly it glows (emission multiplier times a
     // rough visible-brightness factor of its temperature), so thin but hot debris counts as visible.
     vec4 g = texelFetch(uSrc, p, 0);
-    float tau = max(g.r, 0.0) * uTexel;
+    float tau = max(g.r, 0.0) * uRefLen;
     float hot = clamp((g.g / 0.65) * (g.g / 0.65), 0.05, 20.0);
     float v = max(tau, tau * max(g.b, 0.0) * hot);
     if (v > 1e-4) atomicMax(peaks[uSlot], uint(min(v, 4.0e5) * 1e4));

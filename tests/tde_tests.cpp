@@ -1,10 +1,13 @@
-// CPU checks for the star-disruption physics (src/tde/TdePhysics.h, mirrored by the tde shaders).
+// CPU checks for the star-disruption physics (src/tde/TdePhysics.h, mirrored by the tde shaders) and the
+// GL-free decision logic of TdeSim (src/tde/TdeControl_internal.h).
 // Build: g++ -std=c++20 -O2 -I src -I <glm> tests/tde_tests.cpp -o tde_tests
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
+#include "tde/TdeControl_internal.h"
 #include "tde/TdePhysics.h"
 
 using namespace bhs::tde::phys;
@@ -437,6 +440,218 @@ static void testSubcycleCap() {
     CHECK(std::isfinite(x2.x) && x2.x < 1e9, "radial infall from 1e9 M stays finite");
 }
 
+// ------------------------------------------------------------------------------------------------
+// TdeControl_internal.h: frame plan of the cost model.
+namespace ctl = bhs::tde::control;
+
+static ctl::CostModel testCostModel() {
+    ctl::CostModel m;
+    m.budgetMs = 2.7;
+    m.stepFixedMs = 0.4;
+    m.perParticleMs = 3.0e-6;
+    m.perSubstepMs = 1.0e-7;
+    m.perWriteMs = 1.0e-7;
+    m.perBlockMs = 3.0e-4;
+    m.volumeFixedMs = 0.06;
+    m.volumePerBlockMs = 2.0e-4;
+    return m;
+}
+
+static ctl::WorkCounters counters(double particles, double substepsPerParticle, double stepLength) {
+    ctl::WorkCounters w;
+    w.valid = true;
+    w.particles = particles;
+    w.updated = particles;
+    w.substeps = substepsPerParticle * particles;
+    w.writes = 8.0 * particles;
+    w.stepLength = stepLength;
+    w.blocks = 500.0;
+    return w;
+}
+
+static void testFramePlan() {
+    std::printf("cost model: frame plan\n");
+    const ctl::CostModel m = testCostModel();
+    const double dtH = 10.0;
+    // Light work: several full steps, the predicted frame within the budget.
+    {
+        const ctl::WorkCounters w = counters(131072, 1.0, dtH);
+        const ctl::FramePlan p = ctl::planFrame(m, w, dtH);
+        const double frame = ctl::volumeCostMs(m, w) + p.maxSteps * ctl::stepCostMs(m, w, dtH);
+        CHECK(p.maxSteps >= 2 && p.maxStep == dtH && frame <= m.budgetMs,
+              "131k particles, one substep each: %d full steps, predicted %.2f ms", p.maxSteps, frame);
+        const ctl::WorkCounters w2 = counters(262144, 1.0, dtH);
+        const ctl::FramePlan p2 = ctl::planFrame(m, w2, dtH);
+        CHECK(p2.maxSteps >= 1 && p2.maxSteps <= p.maxSteps, "twice the particles: no more steps (%d <= %d)", p2.maxSteps, p.maxSteps);
+    }
+    // Heavy substeps: one full step does not fit, a single shorter one that does.
+    {
+        const ctl::WorkCounters w = counters(262144, 40.0, dtH);
+        const double full = ctl::volumeCostMs(m, w) + ctl::stepCostMs(m, w, dtH);
+        const ctl::FramePlan p = ctl::planFrame(m, w, dtH);
+        const double frame = ctl::volumeCostMs(m, w) + ctl::stepCostMs(m, w, p.maxStep);
+        CHECK(full > m.budgetMs && p.maxSteps == 1 && p.maxStep < dtH && p.maxStep >= m.minStepFraction * dtH &&
+                  std::abs(frame - m.budgetMs) < 1e-9,
+              "40 substeps per particle: one step shortened to %.3f of the limit, predicted %.3f ms (full step %.2f ms)",
+              p.maxStep / dtH, frame, full);
+        // Substeps scale with the step length: the same work measured at half the length means twice the rate.
+        const ctl::WorkCounters wHalf = counters(262144, 40.0, 0.5 * dtH);
+        CHECK(ctl::stepCostMs(m, wHalf, dtH) > ctl::stepCostMs(m, w, dtH), "the same substeps over a shorter step predict a costlier full step");
+        // ... but never beyond the update's per-particle cap.
+        const double capped = ctl::stepBaseMs(m, w) + m.perSubstepMs * (m.maxSubsteps - 1) * 262144.0;
+        CHECK(ctl::stepCostMs(m, w, 1e6 * dtH) <= capped + 1e-9, "the substep cap bounds the predicted cost (%.2f ms)", capped);
+    }
+    // The shortest step is bounded; no shortening when even a step of zero length does not fit.
+    {
+        ctl::WorkCounters w = counters(262144, 48.0, dtH);
+        ctl::CostModel tight = m;
+        tight.budgetMs = ctl::volumeCostMs(m, w) + ctl::stepBaseMs(m, w) + 0.01;
+        const ctl::FramePlan p = ctl::planFrame(tight, w, dtH);
+        CHECK(p.maxStep == tight.minStepFraction * dtH, "a nearly full budget: the step stops at %.3f of the limit", p.maxStep / dtH);
+        tight.budgetMs = 0.5 * (ctl::volumeCostMs(m, w) + ctl::stepBaseMs(m, w));
+        const ctl::FramePlan q = ctl::planFrame(tight, w, dtH);
+        CHECK(q.maxSteps == 1 && q.maxStep == dtH, "fixed costs alone over the budget: one full step (shortening cannot help)");
+    }
+    // Before the first counters: conservative (24 substeps per particle, every corner a global update).
+    {
+        ctl::WorkCounters none;
+        none.particles = none.updated = 262144;
+        const ctl::WorkCounters light = counters(262144, 1.0, dtH);
+        CHECK(ctl::stepCostMs(m, none, dtH) > ctl::stepCostMs(m, light, dtH), "no counters yet: costlier than light measured work");
+    }
+    // Degenerate inputs stay finite.
+    {
+        ctl::WorkCounters w = counters(std::numeric_limits<double>::quiet_NaN(), 3.0, 0.0);
+        w.substeps = std::numeric_limits<double>::infinity();
+        w.blocks = -5.0;
+        const ctl::FramePlan p = ctl::planFrame(m, w, dtH);
+        const double c = ctl::stepCostMs(m, w, dtH);
+        CHECK(std::isfinite(c) && c > 0.0 && p.maxSteps >= 1 && std::isfinite(p.maxStep) && p.maxStep > 0.0,
+              "NaN / infinite / negative counters: finite plan (%d steps of %.3g M)", p.maxSteps, p.maxStep);
+    }
+    // Splitting a requested advance.
+    {
+        const ctl::FramePlan p{3, 2.0};
+        const ctl::FrameSteps a = ctl::frameSteps(p, 5.0);
+        CHECK(a.steps == 3 && std::abs(a.h * a.steps - 5.0) < 1e-12 && !a.limited, "dt 5 with 3 steps of <= 2: 3 steps of %.4f", a.h);
+        const ctl::FrameSteps b = ctl::frameSteps(p, 100.0);
+        CHECK(b.steps == 3 && b.h == 2.0 && b.advance == 6.0 && b.limited, "dt 100: limited to 3 full steps");
+        const ctl::FrameSteps c = ctl::frameSteps(p, 0.5);
+        CHECK(c.steps == 1 && c.h == 0.5 && !c.limited, "dt 0.5: one step");
+        const ctl::FrameSteps d = ctl::frameSteps(p, 0.0);
+        CHECK(d.steps == 0 && d.h == 0.0 && !d.limited, "dt 0: no step");
+    }
+}
+
+// TdeControl_internal.h: remnant classification and self-gravity switch, on scripted readback sequences
+// (times in units of the star's dynamical time, one frame per 0.05 t*).
+static void testCoreState() {
+    std::printf("core state: remnant classification and self-gravity switch\n");
+    ctl::CoreParams p;
+    p.tStar = 1.0;
+    const double frame = 0.05;
+    struct Phase {
+        double until;
+        bool coreMode, frozen, outbound;
+        double boundMass;
+    };
+    auto run = [&](std::initializer_list<Phase> phases, double& minW, double& wEnd, bool& anyRemnant, double& firstRemnant, double& tEnd) {
+        ctl::CoreState s;
+        s.reset();
+        minW = 1.0;
+        anyRemnant = false;
+        firstRemnant = -1.0;
+        double t = 0.0;
+        for (const Phase& ph : phases) {
+            for (; t < ph.until; t += frame) {
+                ctl::CoreObservation o;
+                o.t = t;
+                o.frameDt = frame;
+                o.coreMode = ph.coreMode;
+                o.frozen = ph.frozen;
+                o.coreValid = true;
+                o.outbound = ph.outbound;
+                o.boundMass = ph.boundMass;
+                s.observe(o, p);
+                minW = std::min(minW, s.selfGravityWeight());
+                if (s.remnant() && !anyRemnant) firstRemnant = t;
+                anyRemnant = anyRemnant || s.remnant();
+            }
+        }
+        wEnd = s.selfGravityWeight();
+        tEnd = t;
+        return s;
+    };
+    double minW, wEnd, firstRemnant, tEnd;
+    bool anyRemnant;
+    // Full disruption: round bound star inbound, then a stream with no core and the bound mass falling away.
+    run({{3.0, true, false, false, 1.0}, {4.0, false, false, true, 0.2}, {5.0, false, false, true, 0.02}, {6.0, false, false, true, 0.005},
+         {20.0, false, false, true, 0.0}},
+        minW, wEnd, anyRemnant, firstRemnant, tEnd);
+    CHECK(!anyRemnant && wEnd == 0.0, "full disruption: never a remnant, self-gravity off at the end (weight %.2f)", wEnd);
+    {
+        // The weight holds for the delay after the bound mass drops below 1% (t = 5), then fades over 2 t*.
+        ctl::CoreState s;
+        s.reset();
+        double at7 = -1.0, at8 = -1.0, at9p1 = -1.0;
+        for (double t = 0.0; t < 10.0; t += frame) {
+            ctl::CoreObservation o;
+            o.t = t;
+            o.frameDt = frame;
+            o.coreMode = t < 3.0;
+            o.coreValid = true;
+            o.outbound = t >= 3.0;
+            o.boundMass = t < 5.0 ? 0.5 : 0.001;
+            s.observe(o, p);
+            if (std::abs(t - 6.95) < 1e-6) at7 = s.selfGravityWeight();
+            if (std::abs(t - 8.0) < 1e-6) at8 = s.selfGravityWeight();
+            if (std::abs(t - 9.1) < 1e-6) at9p1 = s.selfGravityWeight();
+        }
+        CHECK(at7 == 1.0 && at8 > 0.3 && at8 < 0.7 && at9p1 == 0.0, "fade timing: 1 at 2 t* after the drop, %.2f one t* later, 0 after two", at8);
+    }
+    // Partial disruption: the core blurs at pericentre and comes back round and stable.
+    run({{3.0, true, false, false, 1.0}, {4.0, false, false, true, 0.6}, {12.0, true, false, true, 0.8}}, minW, wEnd, anyRemnant, firstRemnant, tEnd);
+    CHECK(anyRemnant && firstRemnant >= 3.0 + p.remnantDelay - 1e-9 && firstRemnant >= 4.0 + 1.0 - 1e-9 && minW == 1.0,
+          "partial disruption: remnant from t = %.2f (pericentre + 2 t*, core held 1 t*), self-gravity kept", firstRemnant);
+    // Before pericentre the intact star is never a remnant (per-particle classification).
+    run({{8.0, true, false, false, 1.0}}, minW, wEnd, anyRemnant, firstRemnant, tEnd);
+    CHECK(!anyRemnant && minW == 1.0, "intact star approaching: no remnant classification, self-gravity on");
+    // A small remnant whose bound mass reads low, but with a dense round core: gravity kept.
+    run({{3.0, true, false, false, 1.0}, {20.0, true, false, true, 0.002}}, minW, wEnd, anyRemnant, firstRemnant, tEnd);
+    CHECK(minW == 1.0 && anyRemnant, "small remnant (bound mass 0.2%%, core detected): self-gravity kept");
+    // Low bound mass without a core but not for long enough: no fade.
+    run({{3.0, true, false, false, 1.0}, {4.5, false, false, true, 0.001}, {10.0, false, false, true, 0.05}}, minW, wEnd, anyRemnant, firstRemnant, tEnd);
+    CHECK(minW == 1.0, "1.5 t* without bound gas, then bound gas again: no fade");
+    // A frozen remnant is a remnant at once and keeps its gravity.
+    run({{3.0, true, false, false, 1.0}, {6.0, false, true, true, 0.0}}, minW, wEnd, anyRemnant, firstRemnant, tEnd);
+    CHECK(anyRemnant && firstRemnant >= 3.0 - 1e-9 && firstRemnant < 3.0 + 1.5 * frame && minW == 1.0, "frozen remnant: remnant at once, gravity kept");
+    // Recovery: faded out, then a core again: back to 1 at the same rate.
+    run({{3.0, true, false, false, 1.0}, {9.0, false, false, true, 0.0}, {10.0, true, false, true, 0.5}, {12.5, true, false, true, 0.5}},
+        minW, wEnd, anyRemnant, firstRemnant, tEnd);
+    CHECK(minW == 0.0 && wEnd == 1.0, "a core found again after the fade: self-gravity back (min %.2f, end %.2f)", minW, wEnd);
+    // Degenerate: NaN bound mass counts as none; no black hole: nothing switches.
+    run({{3.0, true, false, false, 1.0}, {12.0, false, false, true, std::numeric_limits<double>::quiet_NaN()}}, minW, wEnd, anyRemnant,
+        firstRemnant, tEnd);
+    CHECK(wEnd == 0.0 && std::isfinite(minW), "NaN bound mass: treated as none, weight stays finite");
+    {
+        ctl::CoreParams noBh = p;
+        noBh.blackHole = false;
+        ctl::CoreState s;
+        s.reset();
+        bool ok = true;
+        for (double t = 0.0; t < 10.0; t += frame) {
+            ctl::CoreObservation o;
+            o.t = t;
+            o.frameDt = frame;
+            o.coreValid = true;
+            o.outbound = true;
+            s.observe(o, noBh);
+            ok = ok && !s.remnant() && s.selfGravityWeight() == 1.0;
+        }
+        CHECK(ok, "no black hole (hydrostatic tests): never a remnant, self-gravity always on");
+    }
+}
+
 int main() {
     testCircularOrbits();
     testIsco();
@@ -449,6 +664,8 @@ int main() {
     testSampling();
     testFrozenInDisruption();
     testSubcycleCap();
+    testFramePlan();
+    testCoreState();
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

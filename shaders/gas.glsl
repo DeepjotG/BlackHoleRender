@@ -13,6 +13,8 @@ uniform float uGasRes[GAS_MAX];     // texels per edge
 uniform float uGasBrightness;       // artistic emission scale
 uniform float uGasOpacity;          // artistic absorption scale
 uniform int uGasLive[GAS_MAX];      // 0: the volume holds (almost) nothing and is not worth marching into
+uniform float uGasRefLen;           // M: one length for every volume (8 star radii), so the same gas looks
+                                    // the same in every grid and nothing changes where grids hand over
 
 // Cell size (M) of the finest volume containing p, or 0 when p is outside every volume.
 float gasCellSize(vec3 p) {
@@ -57,7 +59,6 @@ void gasSample(vec3 p, float ds, inout vec3 color, inout float transmittance) {
         float fade = smoothstep(0.5, 2.0, min(edge.x, min(edge.y, edge.z)));
         float k = max(g.r, 0.0) * uGasOpacity * fade;
         if (k <= 0.0 && g.b <= 0.0) continue;
-        float texel = 2.0 * uGasBox[i].w / max(uGasRes[i], 1.0);
         // Turbulent texture: the grids resolve the debris' shape but not its fine structure. Billows
         // (two noise cells per volume half-size) and filaments mottle the emission and temperature, and
         // texel-scale detail noise erodes the thin outskirts of the gas into wisps (as for game clouds):
@@ -67,7 +68,7 @@ void gasSample(vec3 p, float ds, inout vec3 color, inout float transmittance) {
         float n2 = texture(uNoise3d, q * 2.1 + vec3(0.37, 0.61 - uTime * 0.02, 0.11)).r;
         float turb = smoothstep(0.25, 0.75, 0.65 * n1 + 0.35 * n2);   // billows (coarse) with filaments (fine)
         float nd = texture(uNoise3d, q * (uGasRes[i] / 11.0) + vec3(0.71, 0.29, 0.53) + vec3(uTime * 0.03)).r;
-        float dn = clamp(max(g.r, 0.0) * texel / 0.5, 0.0, 1.0);        // density on a 0..1 scale
+        float dn = clamp(max(g.r, 0.0) * uGasRefLen / 0.5, 0.0, 1.0);   // density on a 0..1 scale
         float er = (1.0 - smoothstep(0.3, 0.7, nd)) * 0.7 * (1.0 - turb * 0.5);
         float dEroded = clamp((dn - er) / max(1.0 - er, 0.05), 0.0, 1.0);
         float keep = dn > 0.0 ? dEroded / dn : 0.0;

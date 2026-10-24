@@ -5,6 +5,7 @@
 //          by the deposit; a mean shift that converges on the core's centre of mass); peak density of
 //          grid 0 near the core (whole grid if that window is empty), which tells whether a dense core
 //          survives. Without particles near the prediction, the 7^3 cells around the peak are used.
+//          Also the self-bound mass M_b (cInfo.w), which switches the self-gravity (TdeSim.cpp).
 //  uMode 1 (before the update pass): integrates the core along its geodesic over the coming hydro
 //          step (black hole gravity, same scheme as the particles) and stores TRAJ + 1 samples.
 #include "tde_common.glsl"
@@ -166,7 +167,8 @@ void main() {
             cPos = vec4(cTraj[TRAJ].xyz, 0.0);
             cVel = vec4(0.0);
         }
-        cInfo = vec4(found ? shBest[0] : 0.0, float(mCore[13]), 0.0, 0.0);
+        // Self-bound mass M_b (fraction of the star): read back to switch the self-gravity off without a core.
+        cInfo = vec4(found ? shBest[0] : 0.0, float(mCore[13]), 0.0, uMono.z > 0.5 ? float(mCore[27]) / uScale.w : 0.0);
         // Shape of the gas within 2 d_c: principal axes of its second-moment tensor.
         vec4 axis = vec4(0.0, 1.0, 0.0, 0.0);
         if (mCore[14] > 16u) {

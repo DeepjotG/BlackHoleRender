@@ -472,6 +472,7 @@ void App::frame() {
     }
     fi.gas = gasRefs_.data();
     fi.gasCount = static_cast<int>(gasRefs_.size());
+    fi.gasRefLen = static_cast<float>(std::max(8.0 * tde_.starRadiusM(), 1e-6));
     if (std::getenv("BHS_DEBUG_TDE") && !gasRefs_.empty()) {
         static int n = 0;
         if (++n % 30 == 0) {

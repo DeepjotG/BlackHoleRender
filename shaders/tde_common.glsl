@@ -59,6 +59,10 @@ const int S_G0_MASS = 25;    // frame: grid 0 particles' worth of mass (x256), l
 const int S_G0_OUTER = 26;   // frame: same, in the outer 1/8 of the box on each side
 const int S_LIVE = 27;       // frame: blocks in the dilated set over all grids (last deposit)
 const int S_FROZEN = 28;     // frame: particles frozen / thawed / removed by tde_init.comp modes 7-9
+// Work counters of the last hydro step of a frame, for the cost model of TdeSim.cpp (deterministic: they
+// depend on the particles' state only).
+const int S_SUBSTEPS = 29;   // frame: gravity substeps of all particles (tde_update.comp)
+const int S_GWRITES = 30;    // frame: global cell updates of the deposit (direct deposits + flushed table slots)
 const int S_DTHIST = 64;     // frame: NDT bins of required hydro step
 const int S_WORDS = 64 + NDT;
 
@@ -74,10 +78,12 @@ layout(std140, binding = 3) uniform TdeParams {
     vec4 uLimit;             // acceleration cap factor, C_cfl, C_acc, C_orb
     vec4 uVis;               // rhoStar (3/(4 pi R^3)), Teff, uStar (q/R), dissipation unit
     vec4 uPoly;              // Kp (P/rho = Kp rho'^(1/n)), 1/n, r_p (disk temperature), unused
-    vec4 uExtra;             // pressure scale (diagnostics, 1 = normal), noise damping kappa, unused x2
+    vec4 uExtra;             // pressure scale (diagnostics, 1 = normal), noise damping kappa, self-gravity weight
+                             // (0..1, see selfGravity()), unused
     vec4 uFrozen;            // frozen remnant: xyz centre, w = 1 while it exists
     vec4 uFrozenVel;         // xyz its proper velocity, w = its radius (gas falling inside joins it)
-    ivec4 uInfo;             // particle count, restriction ratio (nest), flags, unused
+    ivec4 uInfo;             // particle count, restriction ratio (nest), flags, 1 while a self-bound core exists
+                             // (its gas then counts with the core's orbital energy in the bound fraction)
 };
 
 // Particle states: 0 active, 1 accreted, 2 escaped, 3 unused, 4 frozen (part of a surviving remnant far
@@ -91,7 +97,8 @@ layout(std430, binding = 5) buffer GridFB { vec4 gFB[]; };     // [grid][cell]: 
 // Monopole histogram and table; mCore: particles within d_c of the predicted core position [0], their
 // summed offsets (x / d_c * 2^22) and relative velocities (v * 2^24) as 64-bit pairs [1..12], how many
 // of them are gravitationally bound to the core [13], particles within 2 d_c [14] and their second
-// moments xx yy zz xy xz yz ((x / 2 d_c)^2 * 2^22, 64-bit pairs) [15..26].
+// moments xx yy zz xy xz yz ((x / 2 d_c)^2 * 2^22, 64-bit pairs) [15..26], particles bound to the core
+// at any distance [27] (boundToCore()).
 const float CORE_XS = 4194304.0;
 const float CORE_VS = 16777216.0;
 // mRho / mCnt / mP / mAr: hydrostatic set-up at release (tde_init.comp): per radial bin the summed
@@ -109,8 +116,9 @@ layout(std430, binding = 6) buffer Mono {
 layout(std430, binding = 7) buffer Core {
     vec4 cPos;                // xyz core position, w = 1 if valid
     vec4 cVel;                // xyz core proper velocity, w = particles' worth of mass near the peak
-    vec4 cInfo;               // x = peak density rho' of grid 0, y = particles bound to the core,
-                              // z = elongation weight (cAxis.w), w unused
+    vec4 cInfo;               // x = peak density rho' of grid 0, y = particles within d_c bound to the core,
+                              // z = elongation weight (cAxis.w), w = fraction of the star bound to the core
+                              // at any distance (mCore[27], the self-bound mass M_b: self-gravity switch)
     vec4 cEndVel;             // xyz predicted core velocity at the end of the hydro step
     vec4 cAxis;               // xyz major axis of the gas near the core, w = elongation weight (0 round)
     vec4 cTraj[TRAJ + 1];     // core position at t = k dt / TRAJ during the current hydro step
@@ -276,16 +284,28 @@ float monoMass(float d) {
     float d0 = dmax * e0 * e0, d1 = dmax * e1 * e1;
     return mix(mCum[b], mCum[b + 1], clamp((d - d0) / max(d1 - d0, 1e-30), 0.0, 1.0));
 }
-// Softened monopole self-gravity of the star's gas around the core centre xc; `ts` returns the local
-// dynamical time sqrt(d^3 / (q M(<d))) with d >= softening.
+// Gas bound to the self-gravitating core: slower relative to the core (dv) than the escape speed from the
+// gas within its distance d of the core (monopole table of the previous step). The potential of the gas
+// outside d is left out, so the binding is slightly underestimated; tides are ignored.
+bool boundToCore(vec3 dx, vec3 dv) {
+    float d = length(dx);
+    return 0.5 * dot(dv, dv) < uEvent.x * monoMass(d) / max(d, uMono.y);
+}
+
+// Softened monopole self-gravity of the star's gas around the core centre xc, scaled by uExtra.z: 1 while
+// gas is bound to a core (the star, a surviving remnant, the self-gravitating middle of a young stream),
+// fading to 0 once almost none is (TdeSim.cpp: a full disruption's stream would otherwise keep pulling
+// on itself through a monopole centred on its densest part). `ts` returns the local dynamical time
+// sqrt(d^3 / (q M(<d))) with d >= softening.
 vec3 selfGravity(vec3 x, vec3 xc, out float ts) {
     vec3 d = x - xc;
     float d2 = dot(d, d);
     float eps = uMono.y;
     float dl = sqrt(d2);
-    float m = uEvent.x * monoMass(dl);
+    float k = uEvent.x * clamp(uExtra.z, 0.0, 1.0);
+    float m = k * monoMass(dl);
     float de = max(dl, eps);
-    ts = sqrt(de * de * de / max(uEvent.x * monoMass(de), 1e-36));
+    ts = de * sqrt(de / max(k * monoMass(de), 1e-30));   // finite even without gravity
     float s2 = d2 + eps * eps;
     vec3 a = d * (-m / (s2 * sqrt(s2)));
     // Near the middle of a filament the monopole's transverse pull 2 q lambda / d is the exact field of

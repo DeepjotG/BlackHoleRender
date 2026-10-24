@@ -8,6 +8,10 @@
 // few cells, which would otherwise serialise on global atomics. When the table has no free slot near
 // a key the deposit goes straight to global memory. Integer sums make the result independent of the
 // order of the additions.
+//
+// It also counts the particles bound to the core at any distance (mCore[27], which switches the
+// self-gravity) and, on the last step of a frame, the global cell updates it made (direct deposits and
+// flushed table slots, sWords[S_GWRITES]) for the cost model of TdeSim.cpp.
 #include "tde_common.glsl"
 
 layout(local_size_x = 256) in;
@@ -17,12 +21,13 @@ const uint EMPTY = 0xFFFFFFFFu;
 shared uint hKey[HSLOTS];
 shared uint hMass[HSLOTS];
 shared uint hUsed;                // slots taken; past 3/4 the table is bypassed (incoherent particles)
+shared uint hDirect;              // cell updates that went straight to global memory
 shared uint hW[HSLOTS * 10];      // per slot: momentum x, y, z, energy, heat as (low, high) pairs
 shared uint shHist[NBINS + 1];
 shared vec4 shCx[256];            // per thread: offset / d_c (xyz), 1 if near the core (w)
 shared vec4 shCv[256];            // per thread: velocity relative to the predicted core velocity
 shared vec4 shM1[256];            // per thread: xx, yy, zz of the offset / (2 d_c), 1 if within 2 d_c
-shared vec4 shM2[256];            // per thread: xy, xz, yz
+shared vec4 shM2[256];            // per thread: xy, xz, yz, 1 if bound to the core (any distance)
 
 void sharedAddPair(int i, uvec2 p) {
     if (p.x == 0u && p.y == 0u) return;
@@ -59,6 +64,7 @@ void depositCell(int g, int cell, uint m, uvec2 p0, uvec2 p1, uvec2 p2, uvec2 p3
     accAddPair(accIndex(g, W_ENER, cell), p3.x, p3.y);
     accAddPair(accIndex(g, W_HEAT, cell), p4.x, p4.y);
     markTouched(g, cell);
+    atomicAdd(hDirect, 1u);
 }
 
 void depositCic(int g, vec3 s, vec3 v, float uS, float hS, bool heat) {
@@ -83,7 +89,10 @@ void main() {
         for (int k = 0; k < 10; ++k) hW[s * 10 + k] = 0u;
     }
     for (uint b = lid; b <= uint(NBINS); b += 256u) shHist[b] = 0u;
-    if (lid == 0u) hUsed = 0u;
+    if (lid == 0u) {
+        hUsed = 0u;
+        hDirect = 0u;
+    }
     barrier();
     vec4 cx = vec4(0.0), cv = vec4(0.0), m1 = vec4(0.0), m2 = vec4(0.0);
 
@@ -123,18 +132,20 @@ void main() {
             float sb = sqrt(d / uMono.x) * float(NBINS);
             uint b = sb >= float(NBINS) ? uint(NBINS) : uint(sb);
             atomicAdd(shHist[b], 1u);
+            // Bound to the core: slower than the escape speed from the mass inside d (monopole table of
+            // the previous step). Summed at any distance it is the self-bound mass M_b, which tells
+            // TdeSim.cpp whether a self-gravitating core is left.
+            vec3 dv = v - cEndVel.xyz;
+            bool bound = boundToCore(dx, dv);
             // Mean shift towards the centre of mass of the gas within d_c of the predicted position:
             // an unbiased centre for the monopole (a biased one would push the whole star around).
             if (d < 2.0 * uMono.w) {
                 vec3 e = dx / (2.0 * uMono.w);
                 m1 = vec4(e * e, 1.0);
-                m2 = vec4(e.x * e.y, e.x * e.z, e.y * e.z, 0.0);
+                m2.xyz = vec3(e.x * e.y, e.x * e.z, e.y * e.z);
             }
+            m2.w = bound ? 1.0 : 0.0;
             if (d < uMono.w) {
-                // Bound to the core: slower than the escape speed from the mass inside d (monopole
-                // table of the previous step).
-                vec3 dv = v - cEndVel.xyz;
-                bool bound = 0.5 * dot(dv, dv) < uEvent.x * monoMass(d) / max(d, uMono.y);
                 cx = vec4(dx / uMono.w, 1.0);
                 cv = vec4(clamp(dv, vec3(-0.1), vec3(0.1)), bound ? 1.0 : 0.0);
             }
@@ -166,6 +177,11 @@ void main() {
     }
     for (uint b = lid; b <= uint(NBINS); b += 256u)
         if (shHist[b] != 0u) atomicAdd(mHist[b], shHist[b]);
+    if (lid == 0u && uStep.w > 0.5) {
+        uint writes = hDirect + min(hUsed, uint(HSLOTS));   // every slot taken is flushed once
+        if (writes != 0u) atomicAdd(sWords[S_GWRITES], writes);
+    }
+    if (lid == 0u && shM2[0].w > 0.5) atomicAdd(mCore[27], uint(shM2[0].w + 0.5));
     if (lid == 0u && shM1[0].w > 0.5) {
         atomicAdd(mCore[14], uint(shM1[0].w + 0.5));
         float mom[6] = float[6](shM1[0].x, shM1[0].y, shM1[0].z, shM2[0].x, shM2[0].y, shM2[0].z);

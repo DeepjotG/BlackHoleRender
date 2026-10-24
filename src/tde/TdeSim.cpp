@@ -5,16 +5,21 @@
 //  * At release the particles (a stratified sample of the Lane-Emden polytrope) are placed on the GPU
 //    and their internal energy is set up so that the grid pressure balances the monopole self-gravity
 //    shell by shell (tde_init.comp, with three force-measured corrections).
-//  * Each frame advances one or more hydro steps (count from a deterministic GPU cost model, length
-//    from a histogram of per-particle step requirements read back two frames late). A hydro step is:
+//  * Each frame advances one or more hydro steps (length from a histogram of per-particle step
+//    requirements read back two frames late; count, or a shorter single step, from a deterministic GPU
+//    cost model fed by work counters read back with it, TdeControl_internal.h). A hydro step is:
 //    core trajectory -> particle update (pressure, relaxation/viscosity, PdV, cooling, sub-cycled
 //    gravity, accretion/escape) -> deposit (integer atomics) -> restriction through the black-hole
 //    nest -> block dilation -> decoding into fields -> core centroid and monopole table.
 //  * Grids: grid 0 follows the star / remnant / densest debris; grids 1-3 are a black-hole-centred
 //    nest with power-of-two size ratios. All are 64^3 and processed in 8^3 blocks that hold gas.
+//  * Self-gravity is a monopole around the core while gas is bound to one; it fades out in the stream
+//    of a full disruption. The bound fraction counts the gas of a surviving remnant with the remnant's
+//    orbital energy (control::CoreState).
 //  * A surviving core that leaves the tidal zone is frozen (moves rigidly, still deposited) so it no
 //    longer dictates the step; gas falling into it joins it; it thaws if it comes back.
-//  * After the last step the four grids are written to RGBA16F volumes through tde_visual.glsl.
+//  * After the last step the four grids are written to RGBA16F volumes through tde_visual.glsl, the
+//    coarsest nest level first (it also provides the particle counts of the noise fade for all grids).
 #include "tde/TdeSim.h"
 
 #include <algorithm>
@@ -28,6 +33,7 @@
 #include "Log.h"
 #include "Shader.h"
 #include "Units.h"
+#include "tde/TdeControl_internal.h"
 #include "tde/TdeDebug.h"
 #include "tde/TdePhysics.h"
 
@@ -47,7 +53,7 @@ constexpr int kStatWords = 64 + kDtBins;
 constexpr int kStatCumulative = 16;
 constexpr int S_ACCRETED = 0, S_ESCAPED = 1, S_NAN = 2;
 constexpr int S_ACTIVE = 16, S_BOUND = 17, S_DISS = 18, S_CAPPED = 20, S_OCC = 21, S_G0_MASS = 25, S_G0_OUTER = 26, S_LIVE = 27,
-              S_FROZEN = 28;
+              S_FROZEN = 28, S_SUBSTEPS = 29, S_GWRITES = 30;
 constexpr int S_DTHIST = 64;
 constexpr GLuint kUboBinding = 3;
 constexpr GLuint kSsboBindings = 11;
@@ -69,20 +75,32 @@ constexpr double kCfl = 0.4;               // hydro step <= kCfl * cell / c_s
 constexpr double kCAcc = 0.5;              // hydro step <= kCAcc * sqrt(cell / |a_pressure|)
 constexpr double kCOrb = 0.05;             // hydro step <= kCOrb * local orbital period (gas in grids)
 constexpr double kDtTailFraction = 0.005;  // fraction of particles allowed to violate the step limit
-// GPU cost model (RTX 3060 Laptop, measured with TdeDebugOptions::profilePasses): one hydro step costs
-// about kStepFixedMs + kStepPerParticleMs * active particles + kStepPerBlockMs * live blocks (the
-// deposit dominates the per-particle part), the volume pass kFramePerBlockMs per live block. The
-// number of hydro steps per frame is chosen from these (deterministic, unlike timer feedback) so the
-// frame stays within kBudgetMs.
-constexpr double kBudgetMs = 2.7;
-constexpr double kStepFixedMs = 0.20;
-constexpr double kStepPerParticleMs = 5.5e-6;
-constexpr double kStepPerBlockMs = 5.0e-4;
-constexpr double kFrameFixedMs = 0.08;
-constexpr double kFramePerBlockMs = 2.0e-4;
-constexpr int kMaxHydroSteps = 8;
+// GPU cost model (RTX 3060 Laptop at its sustained clocks, fitted to 20k whole-frame GPU times of named
+// and extreme events at 131k and 262k particles; TdeControl_internal.h). One hydro step costs
+//     stepFixedMs + perParticleMs * particles + perSubstepMs * gravity substeps + perBlockMs * live blocks,
+// with the work counters of the last hydro step two frames back (the update pass grows with the
+// substeps, which grow with the step length), and the volume pass volumeFixedMs + volumePerBlockMs per
+// live block. The deposit's global updates are counted too but left out (perWriteMs 0): they track the
+// particle count. The fit is slightly conservative (measured / predicted: p99 <= 1.14 for most events,
+// 1.24 for the worst, a bloated 0.08 Msun star at 1e10 Msun), and the budget leaves room for that, so the
+// frame stays within 3 ms. The steps of a frame are chosen from these (deterministic, unlike timer
+// feedback): as many full steps as fit, or one shorter step when the gravity substeps make even one too
+// costly.
+constexpr control::CostModel kCost{
+    /*budgetMs*/ 2.4, /*stepFixedMs*/ 0.19, /*perParticleMs*/ 4.8e-6, /*perSubstepMs*/ 1.1e-7, /*perWriteMs*/ 0.0,
+    /*perBlockMs*/ 5.0e-4, /*volumeFixedMs*/ 0.05, /*volumePerBlockMs*/ 1.8e-4, /*maxSteps*/ 8,
+    /*minStepFraction*/ 0.125, /*maxSubsteps*/ kMaxSubsteps};
 constexpr double kG0InitialHalf = 1.4;     // debris grid half size at release, in stellar radii
 constexpr double kCoreBound = 0.03;        // a core survives while this fraction of the star is bound to it
+// Remnant classification of the bound fraction and the self-gravity switch (TdeControl_internal.h), in
+// dynamical times of the star: a core still there 2 t* after pericentre that has been dense, round and
+// stable for t* is a remnant; self-gravity fades out over 2 t* once, for 2 t*, there has been no such core
+// and less than 1% of the star bound to the core. The threshold is low and the delay long so that a small
+// surviving remnant, whose bound mass reads low while its tails confuse the core tracker, keeps its gravity.
+constexpr double kRemnantDelay = 2.0;
+constexpr double kSelfGravityBound = 0.01;
+constexpr double kSelfGravityOffDelay = 2.0;
+constexpr double kSelfGravityFade = 2.0;
 
 // std140 mirror of the TdeParams block.
 struct alignas(16) ParamsUbo {
@@ -158,7 +176,10 @@ struct TdeSim::Impl {
     bool ringTimed[kRing] = {};
     double ringTime[kRing] = {};
     double ringDt[kRing] = {};
+    int ringEpoch[kRing] = {};      // remnantEpoch when the frame was recorded
+    int ringSteps[kRing] = {};
     GLuint textures[kGrids] = {};
+    GLuint texFadeRef = 0;          // particle count of the coarsest nest level around each texel (noise fade)
 
     // ---------------------------------------------------------------- event
     bool spawned = false, released = false, finished = false, noBh = false;
@@ -196,6 +217,17 @@ struct TdeSim::Impl {
     int frozenCount = 0;
     int pendingFrozenOp = 0;   // 7 freeze, 8 thaw, 9 remove as escaped
     double freezeRetryTime = 0.0;
+    // Every freeze, thaw or removal starts a new epoch: the frame counters of frames recorded before it
+    // count different particles as active or frozen, so readback() does not use them for those counts.
+    int remnantEpoch = 0;
+    double dtAtFreeze = 0.0;   // hydro step limit when the remnant froze (its gas needs it again at a thaw)
+    // Remnant classification and self-gravity (readback()).
+    control::CoreState coreState;   // remnant flag (uInfo.w) and self-gravity weight (uExtra.z)
+    double boundMass = 1.0;         // M_b, fraction of the star bound to the core (cInfo.w)
+    // Cost model inputs: work counters per hydro step (last step of the frame two frames back).
+    double substepsPerStep = 0.0, writesPerStep = 0.0;
+    double hMeasured = 0.0;   // length of the step those counters belong to
+    bool haveCounters = false;
     glm::dvec3 coreX{0.0}, coreV{0.0};
     double coreT = 0.0;
     bool coreValid = false;
@@ -263,14 +295,17 @@ struct TdeSim::Impl {
         for (GLuint b : {bufPos, bufVel, bufAux, bufAcc, bufFA, bufFB, bufMono, bufCore, bufStats, bufBlk, bufFC})
             glClearNamedBufferData(b, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
         glCreateTextures(GL_TEXTURE_3D, kGrids, textures);
-        for (GLuint t : textures) {
-            glTextureStorage3D(t, 1, GL_RGBA16F, kRes, kRes, kRes);
+        glCreateTextures(GL_TEXTURE_3D, 1, &texFadeRef);
+        for (GLuint t : textures) glTextureStorage3D(t, 1, GL_RGBA16F, kRes, kRes, kRes);
+        glTextureStorage3D(texFadeRef, 1, GL_R16F, kRes, kRes, kRes);
+        for (int i = 0; i <= kGrids; ++i) {
+            const GLuint t = i < kGrids ? textures[i] : texFadeRef;
             glTextureParameteri(t, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTextureParameteri(t, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTextureParameteri(t, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTextureParameteri(t, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
             glTextureParameteri(t, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-            glClearTexImage(t, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glClearTexImage(t, 0, i < kGrids ? GL_RGBA : GL_RED, GL_FLOAT, nullptr);
         }
         initialized = true;
         logInfo("star disruption simulation ready ({} particles max, {}^3 grids)", maxParticles, kRes);
@@ -302,6 +337,8 @@ struct TdeSim::Impl {
         std::fill(std::begin(profQ), std::end(profQ), 0u);
         if (textures[0]) glDeleteTextures(kGrids, textures);
         std::fill(std::begin(textures), std::end(textures), 0u);
+        if (texFadeRef) glDeleteTextures(1, &texFadeRef);
+        texFadeRef = 0;
         initialized = false;
         spawned = false;
         volCount = 0;
@@ -315,6 +352,13 @@ struct TdeSim::Impl {
         pendingFrozenOp = 0;
         coreMode = false;
         freezeRetryTime = 0.0;
+        remnantEpoch = 0;
+        dtAtFreeze = 0.0;
+        coreState.reset();
+        boundMass = 1.0;
+        substepsPerStep = writesPerStep = 0.0;
+        hMeasured = 0.0;
+        haveCounters = false;
         coreHistory.fill({0.0, 0.0});
         historyHead = 0;
         stats = TdeStats{};
@@ -450,14 +494,25 @@ struct TdeSim::Impl {
     // The remnant's region: tidal forces there are below ~4% of those at the tidal radius.
     double quietRadius() const { return 3.0 * std::max(ev.rt, ev.rp); }
 
-    int maxHydroSteps() const {
-        if (debugOptions().maxHydroStepsOverride > 0) return std::min(debugOptions().maxHydroStepsOverride, 64);
-        const double active = stats.activeParticles > 0 ? stats.activeParticles : count;
-        const double blocks = std::max(liveBlocks, 64);
-        const double perStep = kStepFixedMs + kStepPerParticleMs * active + kStepPerBlockMs * blocks;
-        const double frame = kFrameFixedMs + kFramePerBlockMs * blocks;
-        return std::clamp(static_cast<int>((kBudgetMs - frame) / perStep), 1, kMaxHydroSteps);
+    // Cost model inputs (TdeControl_internal.h): the work of the last step read back.
+    control::WorkCounters workCounters() const {
+        control::WorkCounters w;
+        w.valid = haveCounters;
+        w.particles = stats.activeParticles > 0 ? stats.activeParticles : count;
+        w.updated = std::max(w.particles - (frozen ? frozenCount : 0), 1.0);
+        w.substeps = substepsPerStep;
+        w.writes = writesPerStep;
+        w.stepLength = hMeasured;
+        w.blocks = liveBlocks;
+        return w;
     }
+    double stepCostMs(double h) const { return control::stepCostMs(kCost, workCounters(), h); }
+    double volumeCostMs() const { return control::volumeCostMs(kCost, workCounters()); }
+    control::FramePlan planFrame(double dtH) const {
+        if (debugOptions().maxHydroStepsOverride > 0) return {std::min(debugOptions().maxHydroStepsOverride, 64), dtH};
+        return control::planFrame(kCost, workCounters(), dtH);
+    }
+    int maxHydroSteps() const { return planFrame(std::max(dtHydroLimit, 1e-9)).maxSteps; }
 
     double escapeRadius() const { return 2.0 * nestL1 * nestRatio * nestRatio; }
 
@@ -508,20 +563,24 @@ struct TdeSim::Impl {
         p.event = glm::vec4(static_cast<float>(ev.q), static_cast<float>(ev.R), static_cast<float>(ev.rp), static_cast<float>(ev.rt));
         p.step = glm::vec4(static_cast<float>(dt), static_cast<float>(kEta), static_cast<float>(kMaxSubsteps), last ? 1.0f : 0.0f);
         const double cell0 = g0Active ? 2.0 * g0Half / kRes : 0.0;
+        // mono.z switches the monopole statistics (histogram, core centroid, bound test); the force has its
+        // own weight (extra.z).
         p.mono = glm::vec4(static_cast<float>(std::max(2.0 * g0Half, 1e-30)), static_cast<float>(0.75 * cell0),
-                           (monoOn && g0Active && debugOptions().selfGravity) ? 1.0f : 0.0f, static_cast<float>(0.4 * g0Half));
+                           (monoOn && g0Active) ? 1.0f : 0.0f, static_cast<float>(0.4 * g0Half));
         const double massUnit = std::floor(2147483648.0 / count);
         p.scale = glm::vec4(static_cast<float>(massUnit), static_cast<float>(energyScale), static_cast<float>(heatScale), static_cast<float>(count));
-        p.phys = glm::vec4(noBh ? 0.0f : 1.0f, static_cast<float>(kViscosity) * debugOptions().viscosityScale,
+        p.phys = glm::vec4(noBh ? 0.0f : 1.0f, static_cast<float>(kViscosity) * debugOptions().viscosityScale * debugOptions().compressionViscosityScale,
                            static_cast<float>(kCoolingOrbits),
                            static_cast<float>(noBh ? 1e30 : escapeRadius()));
         p.limit = glm::vec4(static_cast<float>(kAccelCap), static_cast<float>(kCfl), static_cast<float>(kCAcc), static_cast<float>(kCOrb));
         p.vis = glm::vec4(static_cast<float>(rhoStar), static_cast<float>(star.teff), static_cast<float>(uStar), static_cast<float>(dissUnit));
         p.poly = glm::vec4(static_cast<float>(poly.Kp), static_cast<float>(1.0 / le.n), static_cast<float>(ev.rp), 0.0f);
-        p.extra = glm::vec4(debugOptions().pressureScale, static_cast<float>(kNoiseDamping) * debugOptions().viscosityScale, 0.0f, 0.0f);
+        const double sg = debugOptions().selfGravity ? coreState.selfGravityWeight() : 0.0;
+        p.extra = glm::vec4(debugOptions().pressureScale, static_cast<float>(kNoiseDamping) * debugOptions().viscosityScale * debugOptions().noiseDampingScale,
+                            static_cast<float>(sg), 0.0f);
         p.frozen = glm::vec4(glm::vec3(frzXDep), frozen ? 1.0f : 0.0f);
         p.frozenVel = glm::vec4(glm::vec3(frzV), static_cast<float>(frzRadius));
-        p.info = glm::ivec4(count, nestRatio, g0Restricts() ? 1 : 0, 0);
+        p.info = glm::ivec4(count, nestRatio, g0Restricts() ? 1 : 0, coreState.remnant() ? 1 : 0);
         const GLintptr off = static_cast<GLintptr>(uboSlot * uboStride);
         glNamedBufferSubData(bufUbo, off, sizeof p, &p);
         glBindBufferRange(GL_UNIFORM_BUFFER, kUboBinding, bufUbo, off, sizeof p);
@@ -572,12 +631,12 @@ struct TdeSim::Impl {
         clearAccumulators();
         mark(3);
         dispatchParticles(progDeposit);
+        mark(4);   // the restriction pass time includes grid 0's restriction into the nest
         if (g0Restricts()) {
             progG0Nest.use();
             glDispatchCompute(kRes / 8, kRes / 8, kRes / 8);
             barrier();
         }
-        mark(4);
         progRestrict.use();
         for (int k = 1; k + 1 < kGrids; ++k) {
             if (geomDep[k].w <= 0.0 || geomDep[k + 1].w <= 0.0) continue;
@@ -663,6 +722,9 @@ struct TdeSim::Impl {
         coreV = comV;
         coreT = time;
         coreValid = true;
+        // The whole star is bound to itself.
+        coreState.reset();
+        boundMass = 1.0;
         for (int g = 0; g < kGrids; ++g) sinceActivation[g] = 0;
         planGeometry(time);
         for (auto& g : geomFld) g = glm::dvec4(0.0);
@@ -717,6 +779,33 @@ struct TdeSim::Impl {
     }
 
     // ============================================================ readback (two frames behind)
+    // Remnant classification of the bound fraction and the self-gravity weight from the core state of the
+    // frame in `slot` (control::CoreState, TdeControl_internal.h).
+    void updateRemnantState(const ReadbackData& rb, int slot) {
+        boundMass = std::max(static_cast<double>(rb.core[11]), 0.0);
+        g_debugInfo.boundNearCore = rb.core[9] / static_cast<double>(count);
+        g_debugInfo.elongation = rb.core[10];
+        g_debugInfo.peakDensity = rb.core[8] / std::max(rhoStar, 1e-300);
+        control::CoreObservation o;
+        o.t = ringTime[slot];
+        o.frameDt = ringDt[slot];
+        o.g0Active = g0Active;
+        o.coreMode = coreMode;
+        o.frozen = frozen;
+        o.coreValid = coreValid;
+        o.outbound = glm::dot(coreX, coreV) > 0.0;
+        o.boundMass = boundMass;
+        control::CoreParams p;
+        p.tStar = tStar;
+        p.remnantDelay = kRemnantDelay;
+        p.selfGravityBound = kSelfGravityBound;
+        p.selfGravityOffDelay = kSelfGravityOffDelay;
+        p.selfGravityFade = kSelfGravityFade;
+        p.fadeEnabled = debugOptions().selfGravityFade;
+        p.blackHole = !noBh;
+        coreState.observe(o, p);
+    }
+
     void readback() {
         if (gpuFrame < 2) return;
         const int slot = static_cast<int>((gpuFrame - 2) % kRing);
@@ -736,14 +825,23 @@ struct TdeSim::Impl {
             g_debugInfo.gpuMs = t1 > t0 ? static_cast<double>(t1 - t0) * 1e-6 : 0.0;
         }
         const double n = static_cast<double>(count);
+        // Cumulative counters: valid whatever happened since the frame was recorded.
         stats.accretedFraction = rb.words[S_ACCRETED] / n;
         stats.escapedFraction = rb.words[S_ESCAPED] / n;
         g_debugInfo.nonFiniteParticles = static_cast<int>(rb.words[S_NAN]);
         if (!ringHadSteps[slot]) return;
-        if (frozen) frozenCount += static_cast<int>(rb.words[S_FROZEN]);   // gas that fell into the remnant
-        const bool frozenBound = frozen && !noBh && phys::specificEnergy(frzX, frzV) < 1.0;
-        stats.activeParticles = static_cast<int>(rb.words[S_ACTIVE]) + (frozen ? frozenCount : 0);
-        stats.boundFraction = (rb.words[S_BOUND] + (frozenBound ? frozenCount : 0)) / n;
+        // A freeze, thaw or removal of the remnant after this frame was recorded changed which particles
+        // are active and which belong to the remnant (the frozen ones are added here, the active ones were
+        // counted on the GPU): the frame's particle counts, its "no gas left" test and its time-step
+        // histogram (which does not know the thawed gas) are not used; the HUD keeps the previous counts
+        // for those (at most two) frames.
+        const bool sameEpoch = ringEpoch[slot] == remnantEpoch;
+        if (sameEpoch) {
+            if (frozen) frozenCount += static_cast<int>(rb.words[S_FROZEN]);   // gas that fell into the remnant
+            const bool frozenBound = frozen && !noBh && phys::specificEnergy(frzX, frzV) < 1.0;
+            stats.activeParticles = static_cast<int>(rb.words[S_ACTIVE]) + (frozen ? frozenCount : 0);
+            stats.boundFraction = (rb.words[S_BOUND] + (frozenBound ? frozenCount : 0)) / n;
+        }
         const double diss = (static_cast<double>(rb.words[S_DISS + 1]) * 4294967296.0 + rb.words[S_DISS]) * dissUnit / n;
         const double rate = ringDt[slot] > 0.0 ? diss / ringDt[slot] : 0.0;
         stats.dissipationRel = noBh ? 0.0 : rate * tMin * 4.0 * ev.rp;
@@ -754,7 +852,15 @@ struct TdeSim::Impl {
         }
         liveBlocks = static_cast<int>(rb.words[S_LIVE]);
         g_debugInfo.liveBlocks = liveBlocks;
-        if (stats.activeParticles == 0 && released) {
+        // Work of the frame's last hydro step: the cost model's inputs.
+        substepsPerStep = rb.words[S_SUBSTEPS];
+        writesPerStep = rb.words[S_GWRITES];
+        hMeasured = ringSteps[slot] > 0 ? ringDt[slot] / ringSteps[slot] : 0.0;
+        haveCounters = true;
+        g_debugInfo.readbackSteps = ringSteps[slot];
+        g_debugInfo.readbackActive = static_cast<double>(rb.words[S_ACTIVE]);
+        g_debugInfo.readbackBlocks = static_cast<double>(liveBlocks);
+        if (sameEpoch && stats.activeParticles == 0 && released) {
             finished = true;
             volCount = 0;
             logInfo("star disruption: no gas left at t = {:.4g} M (accreted {:.3f}, escaped {:.3f})", time,
@@ -764,7 +870,7 @@ struct TdeSim::Impl {
 
         // Hydro step limit: all but kDtTailFraction of the particles are satisfied.
         uint64_t total = 0;
-        for (int b = 0; b < kDtBins; ++b) total += rb.words[S_DTHIST + b];
+        for (int b = 0; sameEpoch && b < kDtBins; ++b) total += rb.words[S_DTHIST + b];
         if (total > 0) {
             const double target = kDtTailFraction * static_cast<double>(total);
             uint64_t cum = 0;
@@ -826,6 +932,7 @@ struct TdeSim::Impl {
                         g0Starved >= 3 ? "no dense core left" : (coarse ? "no finer than the black hole grids" : "too large"));
             }
         }
+        updateRemnantState(rb, slot);
         // Freeze a surviving core once it has left the tidal zone; thaw it if it comes back; drop it
         // when it is unbound and far away.
         if (!noBh) {
@@ -863,6 +970,8 @@ struct TdeSim::Impl {
             if (changed == 0) freezeRetryTime = time + tStar;   // try again a dynamical time later
             if (changed > 0) {
                 frozen = true;
+                ++remnantEpoch;
+                dtAtFreeze = dtHydroLimit;
                 frzX = glm::dvec3(core[0], core[1], core[2]);
                 frzV = glm::dvec3(core[4], core[5], core[6]);
                 frzT = time;
@@ -884,6 +993,10 @@ struct TdeSim::Impl {
             coreT = time;
             frozen = false;
             frozenCount = 0;
+            ++remnantEpoch;
+            // The thawed gas needs the step it had when it froze; the histograms of the frames in flight
+            // do not know it yet.
+            if (op == 8 && dtAtFreeze > 0.0) dtHydroLimit = std::min(dtHydroLimit, dtAtFreeze);
             if (op == 9) g0Active = false;
         }
         const GLuint zero = 0;
@@ -894,12 +1007,11 @@ struct TdeSim::Impl {
     void runGpuFrame(double dt) {
         readback();
         if (finished) return;
-        const int nMax = maxHydroSteps();
-        const double dtH = std::max(dtHydroLimit, 1e-9);
-        const double dtFrame = std::min(dt, nMax * dtH);
-        if (dtFrame < dt * (1.0 - 1e-9)) stats.limited = true;
-        const int steps = dtFrame > 0.0 ? std::clamp(static_cast<int>(std::ceil(dtFrame / dtH - 1e-9)), 1, nMax) : 0;
-        const double h = steps > 0 ? dtFrame / steps : 0.0;
+        const control::FrameSteps fs = control::frameSteps(planFrame(std::max(dtHydroLimit, 1e-9)), dt);
+        if (fs.limited) stats.limited = true;
+        const int steps = fs.steps;
+        const double h = fs.h;
+        const double dtFrame = fs.advance;
         lastSteps = steps;
         lastDt = h;
 
@@ -940,21 +1052,38 @@ struct TdeSim::Impl {
         // Rendering volumes from the last deposit.
         writeParams(h, false, true);
         if (profile && profQ[0]) glQueryCounter(profQ[8], GL_TIMESTAMP);
+        // The coarsest nest level goes first: it also writes the particle counts that every other grid's
+        // noise fade reads (tde_volume.comp).
         progVolume.use();
+        const int fadeLevel = geomFld[kGrids - 1].w > 0.0 ? kGrids - 1 : -1;
+        progVolume.set("uFadeLevel", fadeLevel);
+        progVolume.set("uUnweighted", debugOptions().unweightedVolumes ? 1 : 0);
         volCount = 0;
-        for (int g = 0; g < kGrids; ++g) {
+        for (int k = 0; k < kGrids; ++k) {
+            const int g = fadeLevel >= 0 ? (fadeLevel + k) % kGrids : k;   // reference level first
             if (geomFld[g].w <= 0.0) continue;
+            const bool reference = g == fadeLevel;
             glBindImageTexture(0, textures[g], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+            if (reference) {
+                glBindImageTexture(1, texFadeRef, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_R16F);
+            } else {
+                glBindImageTexture(1, 0, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16F);
+                glBindTextureUnit(15, texFadeRef);
+            }
             progVolume.set("uGrid", g);
             glDispatchCompute(kRes / 8, kRes / 8, kRes / 8);
+            if (reference) glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
             ++sinceActivation[g];
-            if (occ[g] > 0 || sinceActivation[g] <= 3) {
-                GasVolume& v = vols[static_cast<size_t>(volCount++)];
-                v.texture = textures[g];
-                v.center = glm::vec3(geomFld[g]);
-                v.halfSize = static_cast<float>(geomFld[g].w);
-                v.resolution = kRes;
-            }
+        }
+        glBindTextureUnit(15, 0);
+        glBindImageTexture(1, 0, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R16F);
+        for (int g = 0; g < kGrids; ++g) {
+            if (geomFld[g].w <= 0.0 || !(occ[g] > 0 || sinceActivation[g] <= 3)) continue;
+            GasVolume& v = vols[static_cast<size_t>(volCount++)];
+            v.texture = textures[g];
+            v.center = glm::vec3(geomFld[g]);
+            v.halfSize = static_cast<float>(geomFld[g].w);
+            v.resolution = kRes;
         }
         glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
         if (profile && profQ[0]) {
@@ -965,6 +1094,13 @@ struct TdeSim::Impl {
             for (int i = 0; i < kTdePassCount - 1; ++i)
                 g_debugInfo.passMs[i] = (steps > 0 && ts[i + 1] > ts[i]) ? static_cast<double>(ts[i + 1] - ts[i]) * 1e-6 : 0.0;
             g_debugInfo.passMs[kTdePassCount - 1] = ts[9] > ts[8] ? static_cast<double>(ts[9] - ts[8]) * 1e-6 : 0.0;
+            // The work counters of this frame's last step (the profiled one when there is a single step).
+            uint32_t w[kStatWords];
+            glGetNamedBufferSubData(bufStats, 0, sizeof w, w);
+            g_debugInfo.profSubsteps = w[S_SUBSTEPS];
+            g_debugInfo.profWrites = w[S_GWRITES];
+            g_debugInfo.profActive = w[S_ACTIVE] + (frozen ? frozenCount : 0);
+            g_debugInfo.profBlocks = w[S_LIVE];
         }
         glBindImageTexture(0, 0, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
         glCopyNamedBufferSubData(bufStats, bufReadback[slot], 0, 0, kStatWords * 4);
@@ -976,6 +1112,9 @@ struct TdeSim::Impl {
         ringTimed[slot] = timed;
         ringTime[slot] = time;
         ringDt[slot] = dtFrame;
+        ringEpoch[slot] = remnantEpoch;   // after this frame's remnant operation (applyFrozenOp above)
+        ringSteps[slot] = steps;
+        g_debugInfo.predictedFrameMs = steps * stepCostMs(h) + volumeCostMs();
         ++gpuFrame;
         unbindBuffers();
     }
@@ -1013,6 +1152,14 @@ struct TdeSim::Impl {
         g_debugInfo.particleBuffers[1] = bufVel;
         g_debugInfo.particleBuffers[2] = bufAux;
         g_debugInfo.particleCount = count;
+        g_debugInfo.coreMode = coreMode;
+        g_debugInfo.remnant = coreState.remnant();
+        g_debugInfo.frozen = frozen;
+        g_debugInfo.boundMass = boundMass;
+        g_debugInfo.selfGravityWeight = debugOptions().selfGravity ? coreState.selfGravityWeight() : 0.0;
+        g_debugInfo.predictedStepMs = stepCostMs(std::max(dtHydroLimit, 1e-9));
+        g_debugInfo.substepsPerStep = substepsPerStep;
+        g_debugInfo.writesPerStep = writesPerStep;
     }
 
     glm::dvec3 position() {

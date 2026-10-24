@@ -18,9 +18,15 @@ const float OPAC_C = 6.0;
 const float PHOTO_BOOST = 40.0;
 const float PHOTO_RHO0 = 2e-4;
 const float PHOTO_RHO1 = 3e-3;
-// Cells holding less than NOISE_PART particles' worth of gas fade linearly (hides particle noise).
+// Gas with less than NOISE_PART particles' worth per cell fades linearly (hides isolated particles).
+// The count is per cell of one reference grid for every point (the coarsest black-hole nest level,
+// see tde_volume.comp), never per cell of the grid that renders the point: otherwise a fine grid would
+// fade the same gas far more than the coarse grid next to it and their seam would show.
 const float NOISE_PART = 3.0;
 const float ALPHA_MAX = 6.0e4;            // RGBA16F range
+
+// Multiplies the absorption (and so the emission) of gas with fadeCount particles' worth per reference cell.
+float tdeNoiseFade(float fadeCount) { return clamp(fadeCount / NOISE_PART, 0.0, 1.0); }
 
 // ---- temperature (K) and emission multiplier ----------------------------------------------------
 const float T_STREAM = 3800.0;            // cold debris expanding away from pericentre: warm orange
@@ -42,7 +48,8 @@ const float T_MIN = 1200.0;
 const float T_MAX = 6.0e4;
 
 // rho: rho' (star-mass fraction per M^3); rhoU, rhoV, rhoH: densities of internal energy, momentum and
-// heating rate; p: position (M); nPart: particles' worth of gas in the cell.
+// heating rate; p: position (M); nPart: particles' worth of gas in the cell of the rendering grid (only
+// to drop numerical dust). The noise fade (tdeNoiseFade) is applied by the caller.
 vec4 tdeVisual(float rho, float rhoU, vec3 rhoV, float rhoH, vec3 p, float nPart) {
     if (!(rho > 0.0) || nPart <= 1e-3) return vec4(0.0);
     float u = max(rhoU / rho, 0.0);
@@ -51,7 +58,7 @@ vec4 tdeVisual(float rho, float rhoU, vec3 rhoV, float rhoH, vec3 p, float nPart
     float r = max(length(p), 2.0);
 
     float dense = smoothstep(PHOTO_RHO0, PHOTO_RHO1, rho / uVis.x);
-    float alpha = OPAC_C * pow(rho, 1.0 / 3.0) * (1.0 + PHOTO_BOOST * dense) * min(1.0, nPart / NOISE_PART);
+    float alpha = OPAC_C * pow(rho, 1.0 / 3.0) * (1.0 + PHOTO_BOOST * dense);
 
     vec3 rh = p / r;
     float vr = dot(vel, rh);

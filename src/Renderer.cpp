@@ -237,6 +237,7 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     // BHS_GAS_BRIGHTNESS overrides the setting (tuning captures).
     static const float gbOverride = std::getenv("BHS_GAS_BRIGHTNESS") ? static_cast<float>(std::atof(std::getenv("BHS_GAS_BRIGHTNESS"))) : -1.0f;
     p.set("uGasBrightness", gbOverride > 0.0f ? gbOverride : s.gasBrightness);
+    p.set("uGasRefLen", in.gasRefLen);
     for (int i = 0; i < 4; ++i) p.set("uGasLive[" + std::to_string(i) + "]", i < ng ? gasLive_[i] : 0);
     p.set("uGasOpacity", s.gasOpacity);
     for (int i = 0; i < 4; ++i) {
@@ -558,7 +559,7 @@ void Renderer::smoothGas(const FrameInput& in) {
             glBindTexture(GL_TEXTURE_3D, gasSmooth_[i][0]);
             gasPeakProg_.set("uRes", res);
             gasPeakProg_.set("uSlot", i);
-            gasPeakProg_.set("uTexel", 2.0f * in.gas[i].halfSize / static_cast<float>(res));
+            gasPeakProg_.set("uRefLen", in.gasRefLen);
             const GLuint groups = static_cast<GLuint>((res + 3) / 4);
             glDispatchCompute(groups, groups, groups);
         }
