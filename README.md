@@ -30,8 +30,8 @@ cmake --build build
 ./build/blackhole
 ```
 
-System requirements: a C++20 compiler, CMake 3.24+, Python 3 with `jinja2` (for the OpenGL
-loader generator), the X11/Wayland development headers and libEGL.
+System requirements: a C++20 compiler, CMake 3.24+, Ninja (`ninja-build`, optional but faster),
+Python 3 with `jinja2` (for the OpenGL loader generator), the X11/Wayland development headers and libEGL.
 
 ### Which GPU renders, and how the picture reaches the screen
 
@@ -92,6 +92,27 @@ The renderer also supersamples progressively whenever the camera is still, so a 
 keeps sharpening for a few seconds on any preset. *Dynamic resolution* in the Quality panel
 holds a target frame time by scaling the internal resolution.
 
+## Mass, time and planets
+
+* **Black hole mass:** the *Black hole & time* panel has a mass slider from a few suns to ten
+  billion, with presets for a stellar-mass hole, Sagittarius A*, Gargantua (the default, 100 million
+  suns) and M87*. The hole looks the same at every mass (everything near it is measured in units of
+  its mass); what changes is how big physical things such as planets and stars are next to it, and
+  how strong its tides are.
+* **Time warp:** from slow motion to a thousand years per second, with presets. Orbits, and later
+  the star disruption, follow the simulated clock; the disk's swirl keeps its own pace so it stays
+  readable. P pauses everything.
+* **Planets:** three Interstellar-inspired worlds on exact circular Schwarzschild orbits: Miller
+  (an ocean world just outside the innermost stable orbit), Mann (ice) and Edmunds (desert). Each
+  shows its orbital period, speed and how much slower time runs there, and warns when an orbit is
+  unstable or when the hole's tides would tear the planet apart at the current mass. Planets are
+  lensed like everything else, lit by the accretion disk, and drawn at their real size, so from the
+  default view they are smaller than a pixel: use *Travel*.
+* **Travel:** the *Travel* panel flies you to the black hole or any planet. Near a planet the camera
+  rides along with it (Miller moves at almost half the speed of light). Flight speed follows the
+  distance to the nearest surface, so you can creep along a planet's horizon or cross the system in
+  seconds; scroll to scale it, Shift for 5x.
+
 ## Controls
 
 | Input | Action |
@@ -121,6 +142,8 @@ holds a target frame time by scaling the internal resolution.
 --benchmark                      time every preset and print a table
 --lensing 0|1  --disk none|thin|volumetric  --doppler 0..1  --debug steps|footprint|nan
 --fullscreen --width W --height H --seed N --vsync 0|1 --no-ui --no-capture
+--mass SUNS --warp X             black hole mass, simulated seconds per real second
+--goto NAME | --fly NAME         start next to / fly to Miller, Mann, Edmunds or "black hole"
 --igpu                           render on the integrated GPU
 --x11 | --wayland                force a window system (see "Which GPU renders" above)
 --gl-debug                       print OpenGL driver errors and warnings

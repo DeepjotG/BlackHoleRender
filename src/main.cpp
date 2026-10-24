@@ -15,6 +15,11 @@ void usage() {
         "  --wayland | --x11        window system (default: native Wayland when available; with the\n"
         "                           NVIDIA driver loaded, --x11 uses GLX offload through XWayland)\n"
         "  --igpu                   render on the integrated GPU even when the NVIDIA driver is loaded\n"
+        "  --mass SUNS              black hole mass in solar masses (default 1e8)\n"
+        "  --warp X                 simulated seconds per real second\n"
+        "  --goto NAME              start next to a planet (Miller, Mann, Edmunds) or the black hole\n"
+        "  --fly NAME               start a flight to a target at launch\n"
+        "  --universe backdrop|invented|real\n"
         "  --preset low|medium|high|ultra\n"
         "  --bookmark N             start at bookmark 1-4\n"
         "  --pos x,y,z              camera position (M units); --target x,y,z look-at point\n"
@@ -58,6 +63,17 @@ int main(int argc, char** argv) {
         else if (a == "--x11") o.x11 = true;
         else if (a == "--gl-debug") o.glDebug = true;
         else if (a == "--igpu") o.igpu = true;
+        else if (a == "--mass") o.mass = std::stod(next());
+        else if (a == "--warp") o.warp = std::stod(next());
+        else if (a == "--goto") o.gotoTarget = next();
+        else if (a == "--fly") o.flyTarget = next();
+        else if (a == "--universe") {
+            const std::string u = next();
+            if (u == "backdrop") o.universe = 0;
+            else if (u == "invented") o.universe = 1;
+            else if (u == "real") o.universe = 2;
+            else { std::fprintf(stderr, "unknown universe %s\n", u.c_str()); return 2; }
+        }
         else if (a == "--preset") {
             const std::string p = next();
             if (p == "low" || p == "0") o.preset = bhs::PRESET_LOW;

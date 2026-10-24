@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 
 #include <string>
+#include <vector>
 
 #include "Shader.h"
 
@@ -21,6 +22,9 @@ struct FrameInput {
     bool resetAccumulation = false;
     bool diskAnimating = true;
     GLuint targetFbo = 0;   // final framebuffer (0 = window)
+    float extraGpuMs = 0.0f; // GPU work outside the renderer (bridge readback), for frame-time targets
+    const std::vector<struct BodyGpu>* bodies = nullptr;
+    bool farMode = false;    // camera far from the hole: straight rays
     int debugView = 0;
 };
 
@@ -67,13 +71,16 @@ private:
     void compositePass(const FrameInput& in, const Target& hdr, GLuint dstFbo, int w, int h);
     void updateAutoExposure(const FrameInput& in, const Target& hdr);
 
-    ShaderProgram traceProg_, accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
+    ShaderProgram traceProg_, traceBodiesProg_, accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
+    ShaderProgram& traceFor(const FrameInput& in);
     Target trace_, accum_[2], upscaled_, lumaProbe_, captureOut_;
     static constexpr int kMaxBloomLevels = 8;
     Target bloom_[kMaxBloomLevels];
     int bloomLevels_ = 0;
     int accumPing_ = 0;
     GLuint vao_ = 0;
+    GLuint bodyBuffer_ = 0;
+    size_t bodyCapacity_ = 0;
 
     static constexpr int kQueryRing = 4;
     GLuint queries_[kQueryRing] = {};

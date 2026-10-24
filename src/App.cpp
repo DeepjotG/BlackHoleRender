@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "Capture.h"
+#include "Units.h"
 #include "Log.h"
 
 namespace bhs {
@@ -47,6 +48,14 @@ void dropNvidiaOnlyEgl() {
     const char* egl = std::getenv("__EGL_VENDOR_LIBRARY_FILENAMES");
     if (egl && std::strstr(egl, "nvidia")) unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
 }
+// The bridge needs both EGL vendors: Mesa for the Wayland window, NVIDIA for the render device.
+// An inherited restriction to one of them (e.g. a Mesa-only power-saving tweak) hides the other.
+void allowAllEglVendors() {
+    if (std::getenv("__EGL_VENDOR_LIBRARY_FILENAMES") || std::getenv("__EGL_VENDOR_LIBRARY_DIRS"))
+        logInfo("ignoring __EGL_VENDOR_LIBRARY_FILENAMES/DIRS: the GPU bridge needs the Mesa and NVIDIA EGL vendors");
+    unsetenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+    unsetenv("__EGL_VENDOR_LIBRARY_DIRS");
+}
 }  // namespace
 
 // Chooses the GPU and how its frames reach the screen, before any OpenGL vendor library is
@@ -59,12 +68,13 @@ void App::selectGpu() {
     std::error_code ec;
     nvidiaDriver_ = std::filesystem::exists("/proc/driver/nvidia/version", ec);
     dropNvidiaOnlyEgl();
+    // NVIDIA's driver busy-waits a whole CPU core in glClientWaitSync by default; on a laptop that
+    // heat comes out of the GPU's thermal budget. Keep any value the user set.
+    setenv("__GL_YIELD", "USLEEP", 0);
     if (opt_.igpu || !nvidiaDriver_) {
         gpuPath_ = GpuPath::Integrated;
-        if (opt_.igpu) {
-            clearOffloadEnv();
-            logInfo("--igpu: using the integrated GPU");
-        }
+        clearOffloadEnv();
+        if (opt_.igpu) logInfo("--igpu: using the integrated GPU");
         return;
     }
     const bool haveWayland = std::getenv("WAYLAND_DISPLAY") != nullptr;
@@ -75,6 +85,7 @@ void App::selectGpu() {
     } else {
         gpuPath_ = GpuPath::NvidiaBridge;
         clearOffloadEnv();   // the window itself belongs to the display GPU
+        allowAllEglVendors();
         logInfo("NVIDIA driver detected: rendering on the discrete GPU, shown through a native Wayland window");
     }
 }
@@ -107,6 +118,7 @@ bool App::initWindow() {
             gpuPath_ = GpuPath::NvidiaGlx;
         } else if (platform == GLFW_PLATFORM_WAYLAND && gpuPath_ == GpuPath::NvidiaGlx) {
             clearOffloadEnv();
+            allowAllEglVendors();
             gpuPath_ = GpuPath::NvidiaBridge;
         }
         glfwInitHint(GLFW_PLATFORM, platform);
@@ -179,7 +191,7 @@ bool App::initWindow() {
     if (bridge_.active()) logInfo("display: native Wayland window, frames copied from {} each frame", gpuName_);
     if (!isNvidia_ && nvidiaDriver_ && !opt_.igpu) {
         logWarn("The NVIDIA driver is loaded but this window renders on {}.", gpuName_);
-        logWarn("Launch with ./run.sh (without --igpu) to use the RTX 3060.");
+        logWarn("Check that nvidia-smi lists the RTX 3060; after a driver update, reboot first.");
     } else if (!isNvidia_ && !nvidiaDriver_) {
         logWarn("Not running on the NVIDIA GPU (its kernel module is not loaded). Expect lower frame rates.");
         logWarn("Fix: enroll the driver's Secure Boot key (README.md, 'Enabling the RTX 3060').");
@@ -234,6 +246,9 @@ int App::run(const Options& opt) {
     if (opt.diskMode >= 0) settings_.diskMode = opt.diskMode;
     if (opt.doppler >= 0.0f) settings_.dopplerStrength = opt.doppler;
     if (opt.exposure > 0.0f) settings_.exposure = opt.exposure;
+    if (opt.mass > 0.0) settings_.bhMassSolar = opt.mass;
+    if (opt.warp >= 0.0) settings_.timeWarp = opt.warp;
+    if (opt.universe >= 0) settings_.universeMode = opt.universe;
     debugView_ = opt.debugView;
     simTime_ = opt.startTime;
 
@@ -257,11 +272,14 @@ int App::run(const Options& opt) {
     if (opt.bookmark >= 1 && opt.bookmark <= static_cast<int>(bms.size()))
         camera_.setPose(bms[opt.bookmark - 1].pos, bms[opt.bookmark - 1].orient);
     if (opt.hasPos) {
-        camera_.setPose(opt.pos, camera_.orientation());
-        camera_.lookAt(opt.hasTarget ? opt.target : glm::vec3(0.0f));
+        camera_.setPose(glm::dvec3(opt.pos), camera_.orientation());
+        camera_.lookAt(opt.hasTarget ? glm::dvec3(opt.target) : glm::dvec3(0.0));
     } else if (opt.hasTarget) {
-        camera_.lookAt(opt.target);
+        camera_.lookAt(glm::dvec3(opt.target));
     }
+    buildBodies();
+    if (!opt.gotoTarget.empty() && !goTo(opt.gotoTarget, true)) logWarn("--goto: unknown target '{}'", opt.gotoTarget);
+    if (!opt.flyTarget.empty()) goToRequest_ = opt.flyTarget;
     if (!automated && !opt.noCapture) setMouseCaptured(true);
 
     lastTime_ = glfwGetTime();
@@ -327,7 +345,7 @@ void App::onKey(int key, int action, int) {
 
 void App::onScroll(double dy) {
     if (!mouseCaptured_ && ui_.wantsMouse()) return;
-    camera_.baseSpeed = std::clamp(camera_.baseSpeed * static_cast<float>(std::pow(1.25, dy)), 0.02f, 200.0f);
+    camera_.baseSpeed = std::clamp(camera_.baseSpeed * static_cast<float>(std::pow(1.5, dy)), 1e-4f, 1e9f);
 }
 
 void App::onMouseButton(int button, int action) {
@@ -371,8 +389,8 @@ void App::frame() {
 
     Camera::Input in;
     gatherInput(in);
-    camera_.update(dt, in);
     if (!settings_.paused) simTime_ += dt;
+    updateWorld(dt, in);
 
     reloadTimer_ += dt;
     if (reloadTimer_ > 0.5) {
@@ -411,8 +429,11 @@ void App::frame() {
 
     FrameInput fi;
     fi.targetFbo = targetFbo_;
+    fi.extraGpuMs = bridge_.active() ? bridge_.copyMs() : 0.0f;
     fi.camera = &camera_;
     fi.settings = &settings_;
+    fi.bodies = &bodiesGpu_;
+    fi.farMode = camera_.radius() > 1e7;
     fi.time = static_cast<float>(simTime_);
     fi.dt = dt;
     fi.windowW = fbW_;
@@ -451,6 +472,8 @@ void App::frame() {
         ctx.isNvidia = isNvidia_;
         ctx.nvidiaDriverLoaded = nvidiaDriver_;
         ctx.bridged = bridge_.active();
+        ctx.igpuForced = opt_.igpu;
+        ctx.bridgeCopyMs = bridge_.active() ? bridge_.copyMs() : 0.0f;
         ctx.fps = fps_;
         ctx.skyBakeMs = sky_.lastBakeMs();
         ctx.debugView = &debugView_;
@@ -461,6 +484,13 @@ void App::frame() {
         ctx.requestSave = &requestSave_;
         ctx.mouseCaptured = mouseCaptured_;
         ctx.skyDirty = skyDirty;
+        ctx.bhSystem = &bhSystem_;
+        ctx.bodies = &bodies_;
+        ctx.simSeconds = simSeconds_;
+        ctx.followName = &followName_;
+        ctx.goToRequest = &goToRequest_;
+        ctx.nearestName = nearestName_.c_str();
+        ctx.nearestDist = nearestDist_;
         ui_.draw(ctx);
         ui_.render();
     } else {
@@ -485,6 +515,156 @@ void App::frame() {
         fpsFrames_ = 0;
         fpsTimer_ = 0.0;
     }
+}
+
+// ---------------------------------------------------------------------------------- world
+const BodyDesc* App::findBody(const std::string& name) const {
+    for (const BodyDesc& b : bodies_)
+        if (b.name == name) return &b;
+    return nullptr;
+}
+
+double App::nearestSurfaceDistance(std::string* nameOut) const {
+    const glm::dvec3 cam = camera_.position();
+    double best = glm::length(cam) - 2.0;   // the horizon
+    if (nameOut) *nameOut = "black hole";
+    for (const BodyDesc& b : bodies_) {
+        if (!b.collidable) continue;
+        const double d = glm::length(cam - b.pos) - b.radius;
+        if (d < best) {
+            best = d;
+            if (nameOut) *nameOut = b.name;
+        }
+    }
+    return best;
+}
+
+// Flies to (or, with `instant`, jumps next to) a named target: a body or the black hole.
+bool App::goTo(const std::string& name, bool instant) {
+    glm::dvec3 target(0.0);
+    double dist = 30.0;
+    glm::dvec3 fromDir(0.0);
+    const BodyDesc* b = nullptr;
+    if (name == "black hole" || name == "Gargantua" || name == "Sagittarius A*") {
+        fromDir = glm::normalize(glm::dvec3(0.0, 0.1, 1.0));
+    } else {
+        b = findBody(name);
+        if (!b) return false;
+        target = b->pos;
+        dist = b->radius * (b->kind == BodyKind::Star ? 6.0 : 4.5);
+        // Side view from behind the planet's motion: the terminator crosses the disc and the
+        // black hole sits beside it in the frame.
+        const glm::dvec3 out = glm::normalize(b->pos);
+        const glm::dvec3 tang = glm::length(b->vel) > 0.0 ? glm::normalize(b->vel) : glm::dvec3(0, 0, 1);
+        fromDir = glm::normalize(out * 0.15 - tang * 0.9 + glm::dvec3(0.0, 0.3, 0.0));
+    }
+    if (instant) {
+        const glm::dvec3 pos = target + fromDir * dist;
+        camera_.setPose(pos, camera_.orientation());
+        camera_.lookAt(target);
+        if (b) {
+            followName_ = b->name;
+            followPrevPos_ = b->pos;
+        }
+        return true;
+    }
+    followName_.clear();
+    camera_.flyToTarget(target, dist, fromDir);
+    flightTarget_ = b ? b->name : std::string();
+    flightPrevPos_ = target;
+    return true;
+}
+
+void App::buildBodies() {
+    bodies_.clear();
+    const double mass = settings_.bhMassSolar;
+    const double mPerM = units::metersPerM(mass);
+    const double sPerM = units::secondsPerM(mass);
+    if (settings_.planetsEnabled) {
+        for (const Planet& p : bhSystem_.planets) {
+            BodyDesc b;
+            b.name = p.name;
+            b.kind = BodyKind::Planet;
+            b.pos = p.pos;
+            b.vel = p.vel;
+            b.radius = BlackHoleSystem::planetRadiusM(p, mass);
+            b.look = p.look;
+            b.seed = p.seed;
+            b.tint = p.tint;
+            b.atmosphere = p.atmosphere;
+            b.axis = glm::vec3(p.orbitNormal);
+            b.rotation = static_cast<float>(p.phase);   // tidally locked: the same face looks at the hole
+            const double r = glm::length(p.pos);
+            b.lightDir = glm::vec3(-p.pos / std::max(r, 1e-9));
+            const bool diskOn = settings_.diskMode != DISK_NONE;
+            const double fall = std::pow(6.5 / std::max(r, 6.5), 0.6);
+            b.lightIntensity = diskOn ? static_cast<float>(3.0 * fall * settings_.diskBrightness / 5.5) : 0.02f;
+            b.lightColor = glm::vec3(1.0f, 0.83f, 0.64f);
+            const double period = BlackHoleSystem::orbitalPeriodM(p.orbitRadiusM) * sPerM;
+            const double dil = BlackHoleSystem::timeDilationCircularOrbit(p.orbitRadiusM);
+            b.info = p.name + ": orbit " + units::formatDistance(p.orbitRadiusM * mPerM) + ", period " + units::formatDuration(period) +
+                     ", 1 hour there = " + units::formatDuration(3600.0 * dil) + " far away";
+            bodies_.push_back(b);
+        }
+    }
+    bodiesGpu_ = packBodies(bodies_, camera_.position(), 0.25 * 0.0006, 16);
+}
+
+void App::updateWorld(float dt, const Camera::Input& in) {
+    // Simulated time: the warp sets how many seconds pass per real second.
+    const double dtSim = settings_.paused ? 0.0 : settings_.timeWarp * static_cast<double>(dt);
+    simSeconds_ += dtSim;
+    const double dtM = dtSim / units::secondsPerM(settings_.bhMassSolar);
+    bhSystem_.update(dtM);
+    buildBodies();
+
+    // Ride along with the planet we are next to (they orbit at a large fraction of c).
+    if (!followName_.empty()) {
+        if (const BodyDesc* b = findBody(followName_)) {
+            camera_.shift(b->pos - followPrevPos_);
+            followPrevPos_ = b->pos;
+            if (glm::length(camera_.position() - b->pos) > 400.0 * b->radius) followName_.clear();
+        } else {
+            followName_.clear();
+        }
+    }
+    if (camera_.isTransitioning() && !flightTarget_.empty()) {
+        if (const BodyDesc* b = findBody(flightTarget_)) {
+            camera_.retargetFlight(b->pos - flightPrevPos_);
+            flightPrevPos_ = b->pos;
+        }
+    }
+    if (wasTransitioning_ && !camera_.isTransitioning() && !flightTarget_.empty()) {
+        if (const BodyDesc* b = findBody(flightTarget_)) {
+            followName_ = b->name;
+            followPrevPos_ = b->pos;
+        }
+        flightTarget_.clear();
+    }
+    if (followName_.empty() && !camera_.isTransitioning()) {
+        for (const BodyDesc& b : bodies_) {
+            if (b.kind == BodyKind::Planet && glm::length(camera_.position() - b.pos) < 60.0 * b.radius) {
+                followName_ = b.name;
+                followPrevPos_ = b.pos;
+                break;
+            }
+        }
+    }
+
+    // Flight speed follows the distance to the nearest surface (horizon or planet).
+    nearestDist_ = nearestSurfaceDistance(&nearestName_);
+    const double speed = 0.35 * camera_.baseSpeed * std::max(nearestDist_, 1e-12);
+    camera_.maxRadius = settings_.universeMode == 0 ? 20000.0 : 1e22;
+    camera_.update(dt, in, speed);
+    wasTransitioning_ = camera_.isTransitioning();
+    for (const BodyDesc& b : bodies_)
+        if (b.collidable) camera_.pushOutOf(b.pos, b.radius * 1.0003);
+    if (!goToRequest_.empty()) {
+        if (!goTo(goToRequest_, false)) logWarn("unknown travel target '{}'", goToRequest_);
+        goToRequest_.clear();
+    }
+    // Camera-relative body positions must match the camera position used for this frame.
+    bodiesGpu_ = packBodies(bodies_, camera_.position(), 0.25 * 0.0006, 16);
 }
 
 int App::runBenchmark() {

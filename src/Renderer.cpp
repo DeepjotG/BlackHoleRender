@@ -8,6 +8,7 @@
 #include "Capture.h"
 #include "Log.h"
 #include "Settings.h"
+#include "Bodies.h"
 
 namespace bhs {
 
@@ -43,7 +44,7 @@ bool Renderer::init() {
 }
 
 void Renderer::shutdown() {
-    for (ShaderProgram* p : {&traceProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) p->destroy();
+    for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) p->destroy();
     destroyTarget(trace_);
     destroyTarget(accum_[0]);
     destroyTarget(accum_[1]);
@@ -52,12 +53,15 @@ void Renderer::shutdown() {
     destroyTarget(captureOut_);
     for (Target& b : bloom_) destroyTarget(b);
     if (vao_) glDeleteVertexArrays(1, &vao_);
+    if (bodyBuffer_) glDeleteBuffers(1, &bodyBuffer_);
+    bodyBuffer_ = 0;
+    bodyCapacity_ = 0;
     glDeleteQueries(kQueryRing, queries_);
     vao_ = 0;
 }
 
 bool Renderer::shadersOk() const {
-    return traceProg_.valid() && accumProg_.valid() && upscaleProg_.valid() && bloomDownProg_.valid() &&
+    return traceProg_.valid() && traceBodiesProg_.valid() && accumProg_.valid() && upscaleProg_.valid() && bloomDownProg_.valid() &&
            bloomUpProg_.valid() && compositeProg_.valid();
 }
 
@@ -65,8 +69,11 @@ bool Renderer::reloadShaders() {
     bool ok = true;
     shaderLog_.clear();
     struct Entry { ShaderProgram* p; const char* frag; };
+    traceProg_.setDefines({"BHS_BODIES 0"});
+    traceBodiesProg_.setDefines({"BHS_BODIES 1"});
     const Entry entries[] = {
-        {&traceProg_, "blackhole.frag"},   {&accumProg_, "accumulate.frag"}, {&upscaleProg_, "upscale.frag"},
+        {&traceProg_, "blackhole.frag"},   {&traceBodiesProg_, "blackhole.frag"},
+        {&accumProg_, "accumulate.frag"}, {&upscaleProg_, "upscale.frag"},
         {&bloomDownProg_, "bloom_down.frag"}, {&bloomUpProg_, "bloom_up.frag"}, {&compositeProg_, "composite.frag"},
     };
     for (const Entry& e : entries) {
@@ -82,7 +89,7 @@ bool Renderer::reloadShaders() {
 
 bool Renderer::checkShaderReload() {
     bool any = false;
-    for (ShaderProgram* p : {&traceProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) {
+    for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) {
         if (p->reloadIfChanged()) {
             any = true;
             shaderLog_ = p->log();
@@ -159,7 +166,7 @@ void Renderer::updateDynamicScale(const FrameInput& in) {
     dynTimer_ += in.dt;
     if (dynTimer_ < 0.4f || gpuMs_ <= 0.0f) return;
     dynTimer_ = 0.0f;
-    const float ratio = s.targetFrameMs / gpuMs_;
+    const float ratio = s.targetFrameMs / (gpuMs_ + in.extraGpuMs);
     float target = dynScale_ * std::sqrt(std::clamp(ratio, 0.5f, 2.0f));
     target = std::clamp(target, 0.3f, 1.0f);
     if (std::abs(target - dynScale_) > 0.03f) {
@@ -171,16 +178,30 @@ void Renderer::updateDynamicScale(const FrameInput& in) {
 void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const glm::vec2& jitter) {
     const Settings& s = *in.settings;
     const Camera& cam = *in.camera;
-    ShaderProgram& p = traceProg_;
+    ShaderProgram& p = traceFor(in);
     const float tanHalf = std::tan(glm::radians(s.fovDeg) * 0.5f);
     const float pixelAngle = 2.0f * tanHalf / static_cast<float>(dst.h);
     p.set("uResolution", glm::vec2(dst.w, dst.h));
     p.set("uJitter", jitter);
-    p.set("uCamPos", cam.position());
+    p.set("uCamPos", glm::vec3(cam.position()));
     p.set("uCamBasis", cam.basis());
     p.set("uTanHalfFov", tanHalf);
     p.set("uTime", in.time);
     p.set("uLensing", s.lensing ? 1 : 0);
+    p.set("uFarMode", in.farMode ? 1 : 0);
+    // Bodies (planets, stars): shader storage buffer at binding 3.
+    const size_t nb = in.bodies ? in.bodies->size() : 0;
+    if (!bodyBuffer_) glGenBuffers(1, &bodyBuffer_);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, bodyBuffer_);
+    const size_t need = std::max<size_t>(nb, 1) * sizeof(BodyGpu);
+    if (need > bodyCapacity_) {
+        glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(need * 2), nullptr, GL_DYNAMIC_DRAW);
+        bodyCapacity_ = need * 2;
+    }
+    if (nb) glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(nb * sizeof(BodyGpu)), in.bodies->data());
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, bodyBuffer_);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    p.set("uBodyCount", static_cast<int>(nb));
     p.set("uMaxSteps", s.maxSteps);
     p.set("uStepScale", s.stepScale);
     p.set("uDiskStep", s.diskStep);
@@ -215,10 +236,14 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     glBindTexture(GL_TEXTURE_1D, in.blackbodyLut);
 }
 
+ShaderProgram& Renderer::traceFor(const FrameInput& in) {
+    return (in.bodies && !in.bodies->empty()) ? traceBodiesProg_ : traceProg_;
+}
+
 void Renderer::tracePass(const FrameInput& in, Target& dst, const glm::vec2& jitter, bool banded) {
     glBindFramebuffer(GL_FRAMEBUFFER, dst.fbo);
     glViewport(0, 0, dst.w, dst.h);
-    traceProg_.use();
+    traceFor(in).use();
     setTraceUniforms(in, dst, jitter);
     if (!banded) {
         drawFullscreen();

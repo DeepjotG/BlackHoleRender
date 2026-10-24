@@ -80,7 +80,10 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------- core library (shared by app and tests)
 add_library(bhs_core STATIC
   src/Settings.cpp
-  src/Camera.cpp)
+  src/Camera.cpp
+  src/Units.cpp
+  src/BlackHoleSystem.cpp
+  src/Bodies.cpp)
 target_include_directories(bhs_core PUBLIC src)
 target_link_libraries(bhs_core PUBLIC glm::glm)
 target_compile_definitions(bhs_core PUBLIC GLM_ENABLE_EXPERIMENTAL GLM_FORCE_SILENT_WARNINGS)
@@ -115,3 +118,6 @@ add_test(NAME geodesic_tests COMMAND geodesic_tests)
 add_executable(settings_tests tests/settings_tests.cpp)
 target_link_libraries(settings_tests PRIVATE bhs_core)
 add_test(NAME settings_tests COMMAND settings_tests)
+add_executable(bhsystem_tests tests/bhsystem_tests.cpp)
+target_link_libraries(bhsystem_tests PRIVATE bhs_core)
+add_test(NAME bhsystem_tests COMMAND bhsystem_tests)

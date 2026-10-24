@@ -63,6 +63,15 @@ struct Settings {
     float saturation = 1.15f;
     float sharpen = 0.3f;
 
+    // ---- Universe and physical scale ----
+    int universeMode = 0;           // 0 = painted backdrop, 1 = invented 3D universe, 2 = real 3D universe
+    uint32_t universeSeed = 2024u;  // invented universe
+    int realPlacement = 0;          // real universe: 0 = Sagittarius A* (galactic centre), 1 = near the Sun
+    double bhMassSolar = 1.0e8;     // black hole mass (Gargantua: 100 million suns)
+    double timeWarp = 1.0;          // simulated seconds per real second
+    bool planetsEnabled = true;     // planets orbiting the black hole
+    bool showLabels = true;         // on-screen markers for planets and other targets
+
     // ---- Camera ----
     float fovDeg = 60.0f;
     float mouseSensitivity = 0.12f;

@@ -22,7 +22,7 @@ public:
     void shutdown();
     bool active() const { return nvContext_ != nullptr; }
 
-    void makeRenderCurrent();
+    bool makeRenderCurrent();
     void makeDisplayCurrent();
 
     // Framebuffer object on the render context that stands in for the window's default
@@ -34,6 +34,8 @@ public:
 
     const std::string& renderer() const { return renderer_; }
     const std::string& error() const { return error_; }
+    // GPU time of the readback on the NVIDIA queue (smoothed), so frame-time targets can include it.
+    float copyMs() const { return copyMs_; }
 
 private:
     void releaseBuffers();
@@ -49,6 +51,10 @@ private:
     GLuint pbo_[2] = {0, 0};
     GLsync fence_[2] = {nullptr, nullptr};
     int pboW_[2] = {0, 0}, pboH_[2] = {0, 0};
+    GLsizeiptr pboCap_[2] = {0, 0};      // allocated bytes (grown lazily so a resize keeps the frame in flight)
+    GLuint timerQuery_[2] = {0, 0};
+    bool timerIssued_[2] = {false, false};
+    float copyMs_ = 0.0f;
     int w_ = 0, h_ = 0;
     unsigned frame_ = 0;
 
