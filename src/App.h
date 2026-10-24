@@ -11,6 +11,7 @@
 #include "Renderer.h"
 #include "Settings.h"
 #include "TdeControls.h"
+#include "UniverseScene.h"
 #include "tde/TdeSim.h"
 #include "SkyBaker.h"
 #include "Ui.h"
@@ -88,6 +89,12 @@ private:
     Ui ui_;
     BlackHoleSystem bhSystem_;
     tde::TdeSim tde_;
+    UniverseScene universe_;
+    int uniModeApplied_ = -1;
+    uint32_t uniSeedApplied_ = 0;
+    int uniPlacementApplied_ = -1;
+    std::string universeError_;
+    void applyUniverseSettings();
     TdeControls tdeCtl_;
     std::vector<GasVolumeRef> gasRefs_;
     void updateTde(double dtM);

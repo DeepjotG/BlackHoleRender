@@ -18,6 +18,7 @@
 #include "Renderer.h"
 #include "Settings.h"
 #include "TdeControls.h"
+#include "UniverseScene.h"
 #include "tde/TdeSim.h"
 
 namespace bhs {
@@ -184,6 +185,24 @@ void Ui::draw(UiContext& c) {
     if (!r.shadersOk()) ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Shader errors: see terminal (F5 to retry)");
     ImGui::TextDisabled(c.mouseCaptured ? "Esc / Tab: release mouse to use the panel" : "Tab or click: capture mouse to fly   Esc: quit");
 
+    // ---- universe ----
+    if (ImGui::CollapsingHeader("Universe", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* modes[] = {"Painted backdrop", "Invented 3D universe", "Real 3D universe"};
+        ImGui::Combo("Universe", &s.universeMode, modes, 3);
+        if (s.universeMode == 1) {
+            int seed = static_cast<int>(s.universeSeed);
+            if (ImGui::InputInt("Universe seed", &seed, 1, 100, ImGuiInputTextFlags_EnterReturnsTrue)) s.universeSeed = static_cast<uint32_t>(std::max(0, seed));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("New universe")) s.universeSeed = static_cast<uint32_t>(std::rand());
+        } else if (s.universeMode == 2) {
+            const char* places[] = {"Sagittarius A* (centre of the Milky Way)", "Near the Sun (fictional Gargantua)"};
+            ImGui::Combo("Black hole", &s.realPlacement, places, 2);
+        }
+        if (c.universeError && c.universeError[0]) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s", c.universeError);
+        else ImGui::TextDisabled("%s", c.universeStatus);
+        if (s.universeMode != 0 && c.uniStars) ImGui::TextDisabled("%zu stars in view range", c.uniStars);
+    }
+
     // ---- black hole and time ----
     if (ImGui::CollapsingHeader("Black hole & time", ImGuiTreeNodeFlags_DefaultOpen)) {
         const double mPerM = units::metersPerM(s.bhMassSolar);
@@ -326,6 +345,26 @@ void Ui::draw(UiContext& c) {
                 ImGui::SameLine();
                 if (ImGui::Button(b.name.c_str())) *c.goToRequest = b.name;
             }
+        }
+        if (c.uniTargets && !c.uniTargets->empty()) {
+            ImGui::InputTextWithHint("##search", "search stars, galaxies, places", searchBuf_, sizeof searchBuf_);
+            std::string needle(searchBuf_);
+            std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            ImGui::BeginChild("targets", ImVec2(0.0f, 150.0f), ImGuiChildFlags_Borders);
+            int shown = 0;
+            for (const UniverseTarget& t : *c.uniTargets) {
+                if (!needle.empty()) {
+                    std::string hay = t.name;
+                    std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                    if (hay.find(needle) == std::string::npos) continue;
+                }
+                if (++shown > 300) break;
+                const char* kind = t.kind == 0 ? "star" : (t.kind == 1 ? "galaxy" : "place");
+                char label[200];
+                std::snprintf(label, sizeof label, "%s  (%s)##%d", t.name.c_str(), kind, shown);
+                if (ImGui::Selectable(label)) *c.goToRequest = t.name;
+            }
+            ImGui::EndChild();
         }
         if (c.followName && !c.followName->empty()) {
             ImGui::Text("Riding along with %s", c.followName->c_str());

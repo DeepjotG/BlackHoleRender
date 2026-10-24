@@ -4,6 +4,7 @@
 #include "geodesic.glsl"
 #include "blackbody.glsl"
 #include "sky.glsl"
+#include "universe_sky.glsl"
 #include "disk.glsl"
 // Two variants are compiled: BHS_BODIES 1 (planets/stars present) and 0 (none on screen), so the
 // common case does not pay for the body code's register pressure.
@@ -287,7 +288,8 @@ void main() {
     float escDx = dFdx(esc), escDy = dFdy(esc);
     if (escDx != 0.0 || escDy != 0.0) { ddx = ddx0; ddy = ddy0; }
     vec3 sky = vec3(0.0);
-    if (status == 1) sky = sampleSky(escDir, ddx, ddy, uPixelOmega0, rcam);
+    if (status == 1) sky = uUniverse != 0 ? sampleUniverseSky(escDir, ddx, ddy, uPixelOmega0)
+                                          : sampleSky(escDir, ddx, ddy, uPixelOmega0, rcam);
     color += transmittance * sky;
 
     if (uShadowOverlay != 0 && uFarMode == 0) {

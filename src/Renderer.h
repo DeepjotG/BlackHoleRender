@@ -35,6 +35,11 @@ struct FrameInput {
     bool farMode = false;    // camera far from the hole: straight rays
     const GasVolumeRef* gas = nullptr;
     int gasCount = 0;
+    // 3D universe sky (see UniverseScene)
+    bool universe = false;
+    GLuint uniCube = 0, uniStars = 0, uniTiles = 0;
+    float uniStarScale = 1.0f;
+    int uniTileGrid = 128;
     int debugView = 0;
 };
 

@@ -1,0 +1,4 @@
+#version 460 core
+// Diffuse sky of the 3D universe, using the shared galaxy model.
+#include "galaxy_model.glsl"
+#include "universe_bake_body.glsl"

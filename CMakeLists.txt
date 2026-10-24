@@ -95,8 +95,20 @@ if(NOT BHS_TDE_SOURCES)
   set(BHS_TDE_SOURCES ${CMAKE_SOURCE_DIR}/src/stubs/TdeSimStub.cpp)
 endif()
 
+# 3D universe modules: the real implementations when present, placeholders otherwise.
+set(BHS_UNIVERSE_SOURCES)
+foreach(mod GalaxyModel StarField InventedUniverse RealUniverse)
+  if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/${mod}.cpp)
+    list(APPEND BHS_UNIVERSE_SOURCES ${CMAKE_SOURCE_DIR}/src/universe/${mod}.cpp)
+  else()
+    list(APPEND BHS_UNIVERSE_SOURCES ${CMAKE_SOURCE_DIR}/src/stubs/${mod}Stub.cpp)
+  endif()
+endforeach()
+
 add_executable(blackhole
   ${BHS_TDE_SOURCES}
+  ${BHS_UNIVERSE_SOURCES}
+  src/UniverseScene.cpp
   src/main.cpp
   src/App.cpp
   src/Shader.cpp

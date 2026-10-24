@@ -12,6 +12,7 @@ class BlackHoleSystem;
 struct BodyDesc;
 struct Settings;
 struct TdeControls;
+struct UniverseTarget;
 namespace tde { struct TdeStats; }
 
 struct UiContext {
@@ -44,6 +45,10 @@ struct UiContext {
     TdeControls* tde = nullptr;
     const tde::TdeStats* tdeStats = nullptr;
     bool tdeActive = false;
+    const std::vector<UniverseTarget>* uniTargets = nullptr;
+    const char* universeStatus = "";
+    const char* universeError = "";
+    size_t uniStars = 0;
 };
 
 class Ui {
@@ -62,6 +67,7 @@ private:
     void drawMarkers(UiContext& ctx);
     bool inited_ = false;
     bool showHelp_ = true;
+    char searchBuf_[96] = {0};
 };
 
 }  // namespace bhs

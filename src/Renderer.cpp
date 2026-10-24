@@ -194,6 +194,17 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     p.set("uTime", in.time);
     p.set("uLensing", s.lensing ? 1 : 0);
     p.set("uFarMode", in.farMode ? 1 : 0);
+    p.set("uUniverse", in.universe ? 1 : 0);
+    p.set("uUniCube", 3);
+    p.set("uUniStarScale", in.uniStarScale);
+    p.set("uUniT", in.uniTileGrid);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, in.universe ? in.uniCube : in.skyCubemap);
+    if (in.universe) {
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, in.uniStars);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, in.uniTiles);
+    }
+    glActiveTexture(GL_TEXTURE0);
     // Bodies (planets, stars): shader storage buffer at binding 3.
     const size_t nb = in.bodies ? in.bodies->size() : 0;
     if (!bodyBuffer_) glGenBuffers(1, &bodyBuffer_);

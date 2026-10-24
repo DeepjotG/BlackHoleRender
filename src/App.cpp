@@ -268,6 +268,8 @@ int App::run(const Options& opt) {
     sky_.bake(settings_);
     if (!renderer_.init()) logError("shader compilation failed; fix the shaders and press F5");
     tdeCtl_.moduleAvailable = tde_.init(262144);
+    if (!universe_.init()) logWarn("3D universe shaders failed to compile; only the painted backdrop is available");
+    applyUniverseSettings();
     if (!tdeCtl_.moduleAvailable) logInfo("star-disruption simulation not available in this build");
 
     const auto& bms = Camera::defaultBookmarks();
@@ -304,6 +306,7 @@ int App::run(const Options& opt) {
 void App::shutdown() {
     ui_.shutdown();
     tde_.shutdown();
+    universe_.shutdown();
     renderer_.shutdown();
     sky_.shutdown();
     diskTex_.shutdown();
@@ -444,6 +447,12 @@ void App::frame() {
     }
     fi.gas = gasRefs_.data();
     fi.gasCount = static_cast<int>(gasRefs_.size());
+    fi.universe = universe_.active();
+    fi.uniCube = universe_.diffuseCube();
+    fi.uniStars = universe_.starBuffer();
+    fi.uniTiles = universe_.tileBuffer();
+    fi.uniTileGrid = UniverseScene::kTileGrid;
+    fi.uniStarScale = settings_.starBrightness * 15.0f;
     fi.time = static_cast<float>(simTime_);
     fi.dt = dt;
     fi.windowW = fbW_;
@@ -504,6 +513,10 @@ void App::frame() {
         ctx.tde = &tdeCtl_;
         ctx.tdeStats = &tde_.stats();
         ctx.tdeActive = tde_.active();
+        ctx.uniTargets = &universe_.targets();
+        ctx.universeStatus = universe_.status().c_str();
+        ctx.universeError = universeError_.c_str();
+        ctx.uniStars = universe_.starCount();
         ui_.draw(ctx);
         ui_.render();
     } else {
@@ -541,6 +554,10 @@ double App::nearestSurfaceDistance(std::string* nameOut) const {
     const glm::dvec3 cam = camera_.position();
     double best = glm::length(cam) - 2.0;   // the horizon
     if (nameOut) *nameOut = "black hole";
+    if (universe_.active() && universe_.nearestSurfaceM() < best) {
+        best = universe_.nearestSurfaceM();
+        if (nameOut) *nameOut = universe_.nearestName();
+    }
     for (const BodyDesc& b : bodies_) {
         if (!b.collidable) continue;
         const double d = glm::length(cam - b.pos) - b.radius;
@@ -562,7 +579,25 @@ bool App::goTo(const std::string& name, bool instant) {
         fromDir = glm::normalize(glm::dvec3(0.0, 0.1, 1.0));
     } else {
         b = findBody(name);
-        if (!b) return false;
+        if (!b) {
+            // Stars, galaxies and places of the 3D universe.
+            for (const UniverseTarget& t : universe_.targets()) {
+                if (t.name != name) continue;
+                const double viewDist = t.kind == 0 ? t.radius * 8.0 : (t.kind == 1 ? t.radius * 2.2 : t.radius * 2.0);
+                const glm::dvec3 bearing = glm::length(camera_.position() - t.pos) > 0.0 ? glm::normalize(camera_.position() - t.pos)
+                                                                                          : glm::dvec3(0, 0, 1);
+                if (instant) {
+                    camera_.setPose(t.pos + bearing * viewDist, camera_.orientation());
+                    camera_.lookAt(t.pos);
+                } else {
+                    followName_.clear();
+                    flightTarget_.clear();
+                    camera_.flyToTarget(t.pos, viewDist, bearing);
+                }
+                return true;
+            }
+            return false;
+        }
         target = b->pos;
         dist = b->radius * (b->kind == BodyKind::Star ? 6.0 : 4.5);
         // Side view from behind the planet's motion: the terminator crosses the disc and the
@@ -633,7 +668,25 @@ void App::buildBodies() {
         b.info = "The star on its way in";
         bodies_.push_back(b);
     }
-    bodiesGpu_ = packBodies(bodies_, camera_.position(), 0.25 * 0.0006, 16);
+    universe_.update(camera_.position(), simSeconds_, settings_, bodies_);
+}
+
+void App::applyUniverseSettings() {
+    const int mode = settings_.universeMode;
+    if (mode == uniModeApplied_ && (mode != 1 || settings_.universeSeed == uniSeedApplied_) &&
+        (mode != 2 || settings_.realPlacement == uniPlacementApplied_))
+        return;
+    const bool enteringReal = mode == 2 && uniModeApplied_ != 2;
+    uniModeApplied_ = mode;
+    uniSeedApplied_ = settings_.universeSeed;
+    uniPlacementApplied_ = settings_.realPlacement;
+    universeError_.clear();
+    if (!universe_.configure(mode, settings_.universeSeed, settings_.realPlacement, appRoot_ + "/assets/real", &universeError_)) {
+        logWarn("universe: {}", universeError_);
+        return;
+    }
+    if (enteringReal && universe_.content().suggestedMassSolar > 0.0) settings_.bhMassSolar = universe_.content().suggestedMassSolar;
+    renderer_.resetAccumulation();
 }
 
 void App::updateTde(double dtM) {
@@ -684,6 +737,7 @@ void App::updateTde(double dtM) {
 }
 
 void App::updateWorld(float dt, const Camera::Input& in) {
+    applyUniverseSettings();
     // Simulated time: the warp sets how many seconds pass per real second.
     const double dtSim = settings_.paused ? 0.0 : settings_.timeWarp * static_cast<double>(dt);
     simSeconds_ += dtSim;
@@ -739,6 +793,7 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     }
     // Camera-relative body positions must match the camera position used for this frame.
     bodiesGpu_ = packBodies(bodies_, camera_.position(), 0.25 * 0.0006, 16);
+    universe_.prepareRender(camera_.position());
 }
 
 int App::runBenchmark() {
