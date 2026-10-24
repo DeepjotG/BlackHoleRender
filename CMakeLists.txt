@@ -90,15 +90,18 @@ target_compile_definitions(bhs_core PUBLIC GLM_ENABLE_EXPERIMENTAL GLM_FORCE_SIL
 
 # ---------------------------------------------------------------- application
 # Star-disruption simulation: the real module when present, otherwise a placeholder.
+# Modules listed here are built from their placeholders even if the real sources exist
+# (useful while a module is being written), e.g. -DBHS_FORCE_STUBS="RealUniverse;TdeSim".
+set(BHS_FORCE_STUBS "" CACHE STRING "Modules to build from src/stubs placeholders")
 file(GLOB BHS_TDE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/tde/*.cpp)
-if(NOT BHS_TDE_SOURCES)
+if(NOT BHS_TDE_SOURCES OR "TdeSim" IN_LIST BHS_FORCE_STUBS)
   set(BHS_TDE_SOURCES ${CMAKE_SOURCE_DIR}/src/stubs/TdeSimStub.cpp)
 endif()
 
 # 3D universe modules: the real implementations when present, placeholders otherwise.
 set(BHS_UNIVERSE_SOURCES)
 foreach(mod GalaxyModel StarField InventedUniverse RealUniverse)
-  if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/${mod}.cpp)
+  if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/${mod}.cpp AND NOT mod IN_LIST BHS_FORCE_STUBS)
     list(APPEND BHS_UNIVERSE_SOURCES ${CMAKE_SOURCE_DIR}/src/universe/${mod}.cpp)
   else()
     list(APPEND BHS_UNIVERSE_SOURCES ${CMAKE_SOURCE_DIR}/src/stubs/${mod}Stub.cpp)
@@ -140,3 +143,6 @@ add_test(NAME settings_tests COMMAND settings_tests)
 add_executable(bhsystem_tests tests/bhsystem_tests.cpp)
 target_link_libraries(bhsystem_tests PRIVATE bhs_core)
 add_test(NAME bhsystem_tests COMMAND bhsystem_tests)
+add_executable(orbits_tests tests/orbits_tests.cpp)
+target_link_libraries(orbits_tests PRIVATE bhs_core)
+add_test(NAME orbits_tests COMMAND orbits_tests)

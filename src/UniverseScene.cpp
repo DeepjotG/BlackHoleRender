@@ -9,6 +9,7 @@
 #include <filesystem>
 
 #include "Log.h"
+#include "Orbits.h"
 #include "Settings.h"
 #include "Units.h"
 
@@ -78,35 +79,6 @@ glm::dvec3 cubeDir(int face, double u, double v) {
         case 4: return glm::normalize(glm::dvec3(u, -v, 1.0));
         default: return glm::normalize(glm::dvec3(-u, -v, -1.0));
     }
-}
-
-// Heliocentric ecliptic J2000 position (AU) from JPL-style elements at T Julian centuries.
-glm::dvec3 keplerPosition(const universe::OrbitElements& el, double T) {
-    const double d2r = kPi / 180.0;
-    const double a = el.aAU + el.aRate * T, e = std::clamp(el.e + el.eRate * T, 0.0, 0.99);
-    const double I = (el.iDeg + el.iRate * T) * d2r, L = (el.LDeg + el.LRate * T) * d2r;
-    const double varpi = (el.varpiDeg + el.varpiRate * T) * d2r, Om = (el.OmegaDeg + el.OmegaRate * T) * d2r;
-    const double w = varpi - Om;
-    double M = std::remainder(L - varpi, 2.0 * kPi);
-    double E = M + e * std::sin(M);
-    for (int i = 0; i < 12; ++i) E -= (E - e * std::sin(E) - M) / (1.0 - e * std::cos(E));
-    const double xp = a * (std::cos(E) - e), yp = a * std::sqrt(1.0 - e * e) * std::sin(E);
-    const double cw = std::cos(w), sw = std::sin(w), cO = std::cos(Om), sO = std::sin(Om), cI = std::cos(I), sI = std::sin(I);
-    return {(cw * cO - sw * sO * cI) * xp + (-sw * cO - cw * sO * cI) * yp,
-            (cw * sO + sw * cO * cI) * xp + (-sw * sO + cw * cO * cI) * yp,
-            (sw * sI) * xp + (cw * sI) * yp};
-}
-
-glm::dvec3 orbitPoleEcliptic(const universe::OrbitElements& el, double T) {
-    const double d2r = kPi / 180.0;
-    const double I = (el.iDeg + el.iRate * T) * d2r, Om = (el.OmegaDeg + el.OmegaRate * T) * d2r;
-    return {std::sin(I) * std::sin(Om), -std::sin(I) * std::cos(Om), std::cos(I)};
-}
-
-double julianDateNow() {
-    using namespace std::chrono;
-    const double unix = duration<double>(system_clock::now().time_since_epoch()).count();
-    return 2440587.5 + unix / units::kDay;
 }
 
 float atmosphereFor(universe::PlanetLook l) {
@@ -517,14 +489,14 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
 
     // ---- solar system (real universe)
     if (!content_.bodies.empty()) {
-        static const double jd0 = julianDateNow();
+        static const double jd0 = orbits::julianDateNow();
         const double T = (jd0 + simSeconds / units::kDay - 2451545.0) / 36525.0;
         const double Tn = T + 1.0 / 36525.0;   // one day later, for velocities
         for (const universe::OrbitingBody& ob : content_.bodies) {
             if (ob.hostStar < 0 || ob.hostStar >= static_cast<int32_t>(content_.stars.size())) continue;
             const universe::StarRecord& host = content_.stars[static_cast<size_t>(ob.hostStar)];
-            const glm::dvec3 g = host.pos + ob.orbitFrame * (keplerPosition(ob.elements, T) * units::kAU);
-            const glm::dvec3 gn = host.pos + ob.orbitFrame * (keplerPosition(ob.elements, Tn) * units::kAU);
+            const glm::dvec3 g = host.pos + ob.orbitFrame * (orbits::position(ob.elements, T) * units::kAU);
+            const glm::dvec3 gn = host.pos + ob.orbitFrame * (orbits::position(ob.elements, Tn) * units::kAU);
             BodyDesc b;
             b.name = ob.name;
             b.kind = BodyKind::Planet;
@@ -535,12 +507,11 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
             b.seed = static_cast<uint32_t>(std::hash<std::string>{}(ob.name) % 4096u);
             b.tint = ob.tint;
             b.atmosphere = atmosphereFor(ob.look);
-            glm::dvec3 pole = ob.orbitFrame * orbitPoleEcliptic(ob.elements, T);
+            glm::dvec3 pole = ob.orbitFrame * orbits::pole(ob.elements, T);
             if (ob.name == "Saturn") {   // Saturn's rings follow its own pole (IAU: RA 40.589, Dec 83.537)
-                const double ra = 40.589 * kPi / 180.0, de = 83.537 * kPi / 180.0, eps = 23.43928 * kPi / 180.0;
+                const double ra = 40.589 * kPi / 180.0, de = 83.537 * kPi / 180.0;
                 const glm::dvec3 eq(std::cos(de) * std::cos(ra), std::cos(de) * std::sin(ra), std::sin(de));
-                const glm::dvec3 ecl(eq.x, std::cos(eps) * eq.y + std::sin(eps) * eq.z, -std::sin(eps) * eq.y + std::cos(eps) * eq.z);
-                pole = ob.orbitFrame * ecl;
+                pole = ob.orbitFrame * orbits::equatorialToEcliptic(eq);
             }
             b.axis = glm::vec3(glm::normalize(R_ * pole));
             b.rotation = static_cast<float>(std::fmod(simSeconds / 36000.0, 2.0 * kPi));
