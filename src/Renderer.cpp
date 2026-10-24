@@ -104,6 +104,7 @@ void Renderer::ensureTarget(Target& t, int w, int h, GLenum fmt) {
     glGenTextures(1, &t.tex);
     glBindTexture(GL_TEXTURE_2D, t.tex);
     glTexStorage2D(GL_TEXTURE_2D, 1, fmt, w, h);
+    glClearTexImage(t.tex, 0, GL_RGBA, GL_FLOAT, nullptr);   // never sample undefined history
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

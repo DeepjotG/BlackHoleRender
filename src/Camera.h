@@ -34,7 +34,11 @@ public:
     bool isTransitioning() const { return transitioning_; }
 
     // Auto-orbit: circle the hole at the current radius, always looking at it.
-    void setAutoOrbit(bool on) { autoOrbit_ = on; }
+    void setAutoOrbit(bool on) {
+        autoOrbit_ = on;
+        vel_ = glm::vec3(0.0f);
+        rollVel_ = 0.0f;
+    }
     bool autoOrbit() const { return autoOrbit_; }
     float autoOrbitSpeed = 0.08f;  // rad/s
 

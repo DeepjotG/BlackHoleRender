@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 
 #include "App.h"
@@ -22,7 +23,7 @@ void usage() {
         "  --lensing 0|1  --disk none|thin|volumetric  --doppler F  --exposure F  --time SEC\n"
         "  --debug steps|footprint  diagnostic views\n"
         "  --seed N                 sky seed\n"
-        "  --vsync 0|1  --no-ui  --ui  --no-capture\n"
+        "  --vsync 0|1  --no-ui  --ui  --no-capture  --gl-debug\n"
         "  --shaders DIR            shader directory (default: source tree)\n"
         "  --settings FILE          settings file (default settings.ini)\n");
 }
@@ -35,6 +36,7 @@ bool parseVec3(const std::string& s, glm::vec3& v) {
 
 int main(int argc, char** argv) {
     bhs::Options o;
+    try {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -51,6 +53,7 @@ int main(int argc, char** argv) {
         else if (a == "--fullscreen") o.fullscreen = true;
         else if (a == "--wayland") o.wayland = true;
         else if (a == "--x11") o.x11 = true;
+        else if (a == "--gl-debug") o.glDebug = true;
         else if (a == "--preset") {
             const std::string p = next();
             if (p == "low" || p == "0") o.preset = bhs::PRESET_LOW;
@@ -81,7 +84,7 @@ int main(int argc, char** argv) {
         else if (a == "--time") o.startTime = std::stod(next());
         else if (a == "--debug") {
             const std::string d = next();
-            o.debugView = (d == "steps") ? 1 : (d == "footprint") ? 2 : 0;
+            o.debugView = (d == "steps") ? 1 : (d == "footprint") ? 2 : (d == "nan") ? 3 : 0;
         }
         else if (a == "--seed") o.seed = static_cast<unsigned>(std::stoul(next()));
         else if (a == "--vsync") o.vsync = std::stoi(next());
@@ -96,6 +99,12 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "bad numeric argument (%s)\n", e.what());
+        usage();
+        return 2;
+    }
+    if (!o.screenshot.empty() && o.frames <= 0) o.frames = 30;   // --screenshot implies a short automated run
     bhs::App app;
     return app.run(o);
 }

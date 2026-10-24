@@ -8,5 +8,5 @@ uniform float uWeight;   // weight of the current frame (1 / (n + 1))
 void main() {
     vec3 cur = texture(uCurrent, vUv).rgb;
     vec3 prev = texture(uPrevious, vUv).rgb;
-    fragColor = vec4(mix(prev, cur, uWeight), 1.0);
+    fragColor = vec4(uWeight >= 1.0 ? cur : mix(prev, cur, uWeight), 1.0);
 }

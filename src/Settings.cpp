@@ -48,6 +48,7 @@ namespace {
 
 struct Field {
     const char* name;
+    bool trace;   // affects the traced image (resets progressive accumulation)
     std::function<std::string(const Settings&)> get;
     std::function<void(Settings&, const std::string&)> set;
 };
@@ -62,30 +63,34 @@ void fromStr(const std::string& s, int& v) { v = static_cast<int>(std::strtol(s.
 void fromStr(const std::string& s, uint32_t& v) { v = static_cast<uint32_t>(std::strtoul(s.c_str(), nullptr, 10)); }
 void fromStr(const std::string& s, bool& v) { v = (s == "1" || s == "true"); }
 
-#define BHS_FIELD(member)                                                                     \
-    Field{#member, [](const Settings& s) { return toStr(s.member); },                         \
+#define BHS_FIELD_T(member, tr)                                                               \
+    Field{#member, tr, [](const Settings& s) { return toStr(s.member); },                     \
           [](Settings& s, const std::string& v) { fromStr(v, s.member); }}
+#define BHS_FIELD(member) BHS_FIELD_T(member, false)
+#define BHS_TRACE(member) BHS_FIELD_T(member, true)
 
 const std::vector<Field>& fields() {
     static const std::vector<Field> f = {
-        BHS_FIELD(preset), BHS_FIELD(renderScale), BHS_FIELD(maxSteps), BHS_FIELD(stepScale),
-        BHS_FIELD(diskStep), BHS_FIELD(diskMode), BHS_FIELD(skyResolution), BHS_FIELD(dynamicResolution),
-        BHS_FIELD(targetFrameMs), BHS_FIELD(accumulate), BHS_FIELD(maxAccumFrames), BHS_FIELD(vsync),
-        BHS_FIELD(lensing), BHS_FIELD(dopplerStrength),
-        BHS_FIELD(diskInner), BHS_FIELD(diskOuter), BHS_FIELD(diskThickness), BHS_FIELD(diskDensity),
-        BHS_FIELD(diskOpacity), BHS_FIELD(diskPeakTemp), BHS_FIELD(diskBrightness), BHS_FIELD(diskNoiseScale),
-        BHS_FIELD(diskNoiseStrength), BHS_FIELD(diskSpeed), BHS_FIELD(diskWarmth),
+        BHS_FIELD(preset), BHS_TRACE(renderScale), BHS_TRACE(maxSteps), BHS_TRACE(stepScale),
+        BHS_TRACE(diskStep), BHS_TRACE(diskMode), BHS_FIELD(skyResolution), BHS_FIELD(dynamicResolution),
+        BHS_FIELD(targetFrameMs), BHS_TRACE(accumulate), BHS_FIELD(maxAccumFrames), BHS_FIELD(vsync),
+        BHS_TRACE(lensing), BHS_TRACE(dopplerStrength),
+        BHS_TRACE(diskInner), BHS_TRACE(diskOuter), BHS_TRACE(diskThickness), BHS_TRACE(diskDensity),
+        BHS_TRACE(diskOpacity), BHS_TRACE(diskPeakTemp), BHS_TRACE(diskBrightness), BHS_TRACE(diskNoiseScale),
+        BHS_TRACE(diskNoiseStrength), BHS_TRACE(diskSpeed), BHS_TRACE(diskWarmth),
         BHS_FIELD(skySeed), BHS_FIELD(galaxyCount), BHS_FIELD(galaxyBrightness), BHS_FIELD(milkyWayBrightness),
-        BHS_FIELD(nebulaBrightness), BHS_FIELD(starDensity), BHS_FIELD(starBrightness), BHS_FIELD(skyBrightness),
+        BHS_FIELD(nebulaBrightness), BHS_TRACE(starDensity), BHS_TRACE(starBrightness), BHS_TRACE(skyBrightness),
         BHS_FIELD(exposure), BHS_FIELD(autoExposure), BHS_FIELD(bloomIntensity), BHS_FIELD(bloomThreshold),
         BHS_FIELD(tonemap), BHS_FIELD(vignette), BHS_FIELD(grain), BHS_FIELD(chromaticAberration),
         BHS_FIELD(saturation), BHS_FIELD(sharpen),
-        BHS_FIELD(fovDeg), BHS_FIELD(mouseSensitivity), BHS_FIELD(invertY),
-        BHS_FIELD(showShadowOverlay), BHS_FIELD(showUi),
+        BHS_TRACE(fovDeg), BHS_FIELD(mouseSensitivity), BHS_FIELD(invertY),
+        BHS_TRACE(showShadowOverlay), BHS_FIELD(showUi),
     };
     return f;
 }
 #undef BHS_FIELD
+#undef BHS_TRACE
+#undef BHS_FIELD_T
 
 }  // namespace
 
@@ -105,6 +110,17 @@ std::string Settings::fingerprint() const {
         out += ';';
     }
     out += paused ? '1' : '0';
+    return out;
+}
+
+std::string Settings::traceFingerprint() const {
+    std::string out;
+    out.reserve(512);
+    for (const auto& f : fields()) {
+        if (!f.trace) continue;
+        out += f.get(*this);
+        out += ';';
+    }
     return out;
 }
 

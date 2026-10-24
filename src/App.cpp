@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <vector>
 
 #include "Capture.h"
@@ -51,6 +52,8 @@ bool App::initWindow() {
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 #ifndef NDEBUG
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
+#else
+    if (opt_.glDebug) glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 #endif
     GLFWmonitor* monitor = nullptr;
     int w = opt_.width, h = opt_.height;
@@ -89,11 +92,15 @@ bool App::initWindow() {
         logWarn("Not running on the NVIDIA GPU. Expect low frame rates; use the Low preset.");
         logWarn("Fix: enroll the driver's Secure Boot key (README.md, 'Enabling the RTX 3060').");
     }
-#ifndef NDEBUG
-    glEnable(GL_DEBUG_OUTPUT);
-    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-    glDebugMessageCallback(glDebugCb, nullptr);
+#ifdef NDEBUG
+    if (opt_.glDebug) {
+#else
+    {
 #endif
+        glEnable(GL_DEBUG_OUTPUT);
+        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+        glDebugMessageCallback(glDebugCb, nullptr);
+    }
     vsyncApplied_ = settings_.vsync;
     glfwSwapInterval(vsyncApplied_ ? 1 : 0);
     glfwSetWindowUserPointer(window_, this);
@@ -109,7 +116,15 @@ bool App::initWindow() {
 int App::run(const Options& opt) {
     opt_ = opt;
     ShaderProgram::setShaderDir(opt.shaderDir.empty() ? BHS_SHADER_DIR : opt.shaderDir);
-    if (settings_.load(opt.settingsPath)) logInfo("loaded settings from {}", opt.settingsPath);
+    // Resolve settings and screenshots next to the project (build/..), not the launch directory.
+    {
+        std::error_code ec;
+        const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+        appRoot_ = ec ? std::filesystem::current_path().string() : exe.parent_path().parent_path().string();
+        if (opt_.settingsPath == "settings.ini") opt_.settingsPath = appRoot_ + "/settings.ini";
+    }
+    const bool loaded = settings_.load(opt_.settingsPath);
+    if (loaded) logInfo("loaded settings from {}", opt_.settingsPath);
     const bool automated = opt.frames > 0 || opt.benchmark;
     if (automated) {
         // Deterministic, UI-free rendering for scripted captures.
@@ -121,6 +136,7 @@ int App::run(const Options& opt) {
     if (opt.preset >= 0) settings_.applyPreset(opt.preset);
     if (opt.seed) settings_.skySeed = opt.seed;
     if (opt.vsync >= 0) settings_.vsync = opt.vsync != 0;
+    if (!automated) settings_.showUi = !opt.noUi;   // a hidden panel is never persisted across launches
     if (opt.noUi) settings_.showUi = false;
     if (opt.lensing >= 0) settings_.lensing = opt.lensing != 0;
     if (opt.diskMode >= 0) settings_.diskMode = opt.diskMode;
@@ -130,6 +146,12 @@ int App::run(const Options& opt) {
     simTime_ = opt.startTime;
 
     if (!initWindow()) return 1;
+    // First interactive run without the NVIDIA driver: start on Medium so it stays smooth. The
+    // choice is persisted, so this never overrides a saved preset or --preset.
+    if (!isNvidia_ && !loaded && !automated && opt.preset < 0) {
+        settings_.applyPreset(PRESET_MEDIUM);
+        logWarn("non-NVIDIA GPU and no settings file: starting on the Medium preset (Quality panel to change)");
+    }
     if (!ui_.init(window_)) {
         logError("ImGui init failed");
         return 1;
@@ -151,7 +173,8 @@ int App::run(const Options& opt) {
     if (!automated && !opt.noCapture) setMouseCaptured(true);
 
     lastTime_ = glfwGetTime();
-    lastFingerprint_ = settings_.fingerprint();
+    lastFingerprint_ = settings_.traceFingerprint();
+    lastDebugView_ = debugView_;
     int rc = 0;
     if (opt.benchmark) {
         rc = runBenchmark();
@@ -160,7 +183,7 @@ int App::run(const Options& opt) {
             frame();
             if (opt.frames > 0 && frameIndex_ >= opt.frames) break;
         }
-        if (!automated) settings_.save(opt.settingsPath);
+        if (!automated) settings_.save(opt_.settingsPath);
     }
     shutdown();
     return rc;
@@ -187,7 +210,11 @@ void App::onKey(int key, int action, int) {
     if (ui_.wantsKeyboard() && key != GLFW_KEY_ESCAPE && key != GLFW_KEY_TAB) return;
     const auto& bms = Camera::defaultBookmarks();
     switch (key) {
-        case GLFW_KEY_ESCAPE: quit_ = true; break;
+        case GLFW_KEY_ESCAPE:
+            if (ui_.wantsKeyboard()) break;               // a text field is active: ImGui cancels the edit
+            if (mouseCaptured_) setMouseCaptured(false);  // first Esc releases the mouse
+            else quit_ = true;                            // Esc with the mouse already free quits
+            break;
         case GLFW_KEY_TAB: setMouseCaptured(!mouseCaptured_); break;
         case GLFW_KEY_H: settings_.showUi = !settings_.showUi; break;
         case GLFW_KEY_F2: requestScreenshot_ = true; break;
@@ -218,7 +245,8 @@ void App::gatherInput(Camera::Input& in) {
     if (ui_.wantsKeyboard()) return;
     auto down = [&](int k) { return glfwGetKey(window_, k) == GLFW_PRESS; };
     in.move.x = (down(GLFW_KEY_D) ? 1.0f : 0.0f) - (down(GLFW_KEY_A) ? 1.0f : 0.0f);
-    in.move.y = (down(GLFW_KEY_SPACE) ? 1.0f : 0.0f) - ((down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_C)) ? 1.0f : 0.0f);
+    in.move.y = (down(GLFW_KEY_SPACE) ? 1.0f : 0.0f) -
+                ((down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL) || down(GLFW_KEY_C)) ? 1.0f : 0.0f);
     in.move.z = (down(GLFW_KEY_S) ? 1.0f : 0.0f) - (down(GLFW_KEY_W) ? 1.0f : 0.0f);
     in.roll = (down(GLFW_KEY_E) ? 1.0f : 0.0f) - (down(GLFW_KEY_Q) ? 1.0f : 0.0f);
     in.boost = down(GLFW_KEY_LEFT_SHIFT) || down(GLFW_KEY_RIGHT_SHIFT);
@@ -262,8 +290,13 @@ void App::frame() {
         requestReload_ = false;
         renderer_.reloadShaders();
     }
-    if (requestRebake_ || sky_.needsRebake(settings_)) {
+    // ImGui sliders change the value on every frame of a drag and each bake is a synchronous
+    // 1-4 s compute job, so wait until the widget is released and the value has settled.
+    const bool skyDirty = sky_.needsRebake(settings_);
+    skyDirtyFor_ = skyDirty ? skyDirtyFor_ + dt : 0.0;
+    if (requestRebake_ || (skyDirty && skyDirtyFor_ > 0.3 && !ui_.anyItemActive())) {
         requestRebake_ = false;
+        skyDirtyFor_ = 0.0;
         sky_.bake(settings_);
         renderer_.resetAccumulation();
     }
@@ -276,9 +309,10 @@ void App::frame() {
         glfwSwapInterval(vsyncApplied_ ? 1 : 0);
     }
 
-    const std::string fp = settings_.fingerprint();
-    const bool settingsChanged = fp != lastFingerprint_;
+    const std::string fp = settings_.traceFingerprint();
+    const bool settingsChanged = fp != lastFingerprint_ || debugView_ != lastDebugView_;
     lastFingerprint_ = fp;
+    lastDebugView_ = debugView_;
 
     FrameInput fi;
     fi.camera = &camera_;
@@ -295,9 +329,10 @@ void App::frame() {
     fi.debugView = debugView_;
     renderer_.render(fi);
 
-    if (requestCinematic_ || (!opt_.cinematic.empty() && frameIndex_ == 1)) {
+    const int cinematicFrame = (opt_.frames == 1) ? 0 : 1;   // one warm-up frame when possible
+    if (requestCinematic_ || (!opt_.cinematic.empty() && frameIndex_ == cinematicFrame)) {
         requestCinematic_ = false;
-        const std::string path = opt_.cinematic.empty() ? capture::timestampedPath("screenshots", "cinematic") : opt_.cinematic;
+        const std::string path = opt_.cinematic.empty() ? capture::timestampedPath(appRoot_ + "/screenshots", "cinematic") : opt_.cinematic;
         renderer_.captureHighRes(fi, opt_.captureW, opt_.captureH, opt_.captureSamples, path);
         if (!opt_.cinematic.empty()) quit_ = true;
     }
@@ -305,8 +340,10 @@ void App::frame() {
     const bool lastFrame = opt_.frames > 0 && frameIndex_ + 1 >= opt_.frames;
     const bool wantShot = requestScreenshot_ || (lastFrame && !opt_.screenshot.empty());
 
+    // Run the ImGui frame every frame so its input queue drains and the Want* flags stay current;
+    // only the drawing is skipped when the panel is hidden.
+    ui_.newFrame(mouseCaptured_);
     if (settings_.showUi && !wantShot) {
-        ui_.newFrame();
         UiContext ctx;
         ctx.settings = &settings_;
         ctx.camera = &camera_;
@@ -322,14 +359,17 @@ void App::frame() {
         ctx.requestRebake = &requestRebake_;
         ctx.requestSave = &requestSave_;
         ctx.mouseCaptured = mouseCaptured_;
+        ctx.skyDirty = skyDirty;
         ui_.draw(ctx);
         ui_.render();
+    } else {
+        ui_.endFrame();
     }
 
     if (wantShot) {
         requestScreenshot_ = false;
         const std::string path = (lastFrame && !opt_.screenshot.empty()) ? opt_.screenshot
-                                                                         : capture::timestampedPath("screenshots", "blackhole");
+                                                                         : capture::timestampedPath(appRoot_ + "/screenshots", "blackhole");
         capture::savePngFromFramebuffer(path, fbW_, fbH_);
     }
 

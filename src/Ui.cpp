@@ -40,11 +40,19 @@ void Ui::shutdown() {
     inited_ = false;
 }
 
-void Ui::newFrame() {
+void Ui::newFrame(bool mouseCaptured) {
+    ImGuiIO& io = ImGui::GetIO();
+    // While the cursor is disabled GLFW keeps feeding ImGui an unbounded virtual cursor; ignore it.
+    if (mouseCaptured) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
+    else io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    // Drop widget keyboard focus so WantCaptureKeyboard cannot freeze flight controls.
+    if (mouseCaptured) ImGui::SetWindowFocus(nullptr);
 }
+
+void Ui::endFrame() { ImGui::EndFrame(); }
 
 void Ui::render() {
     ImGui::Render();
@@ -53,6 +61,7 @@ void Ui::render() {
 
 bool Ui::wantsKeyboard() const { return inited_ && ImGui::GetIO().WantCaptureKeyboard; }
 bool Ui::wantsMouse() const { return inited_ && ImGui::GetIO().WantCaptureMouse; }
+bool Ui::anyItemActive() const { return inited_ && ImGui::IsAnyItemActive(); }
 
 namespace {
 bool sliderLog(const char* label, float* v, float lo, float hi, const char* fmt = "%.3f") {
@@ -76,14 +85,14 @@ void Ui::draw(UiContext& c) {
     ImGui::TextUnformatted(c.gpuName);
     if (!c.isNvidia) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
-                           "Not running on the RTX 3060. Enroll the driver's Secure Boot key (README, Step 0).");
+                           "Not running on the RTX 3060. Enroll the driver's Secure Boot key (README, 'Enabling the RTX 3060').");
     }
     const glm::ivec2 isz = r.internalSize();
     ImGui::Text("%.0f fps   GPU %.2f ms   %dx%d (%.0f%%)   accum %d", c.fps, r.gpuMs(), isz.x, isz.y,
                 100.0f * s.renderScale * r.dynamicScale(), r.accumulatedFrames());
     ImGui::Text("r = %.2f M   speed %.2f M/s%s", cam.radius(), cam.speedScale(), cam.autoOrbit() ? "   [auto-orbit]" : "");
     if (!r.shadersOk()) ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Shader errors: see terminal (F5 to retry)");
-    ImGui::TextDisabled(c.mouseCaptured ? "Tab: release mouse to use the panel" : "Tab: capture mouse to fly");
+    ImGui::TextDisabled(c.mouseCaptured ? "Esc / Tab: release mouse to use the panel" : "Tab or click: capture mouse to fly   Esc: quit");
 
     // ---- quality ----
     if (ImGui::CollapsingHeader("Quality", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -121,7 +130,7 @@ void Ui::draw(UiContext& c) {
 
     // ---- disk ----
     if (ImGui::CollapsingHeader("Accretion disk")) {
-        ImGui::SliderFloat("Inner radius", &s.diskInner, 3.0f, 12.0f, "%.1f M");
+        ImGui::SliderFloat("Inner radius", &s.diskInner, 4.0f, 12.0f, "%.1f M");
         ImGui::SliderFloat("Outer radius", &s.diskOuter, 8.0f, 60.0f, "%.1f M");
         s.diskOuter = std::max(s.diskOuter, s.diskInner + 1.0f);
         sliderLog("Thickness (H/r)", &s.diskThickness, 0.005f, 0.4f);
@@ -146,6 +155,7 @@ void Ui::draw(UiContext& c) {
         if (ImGui::Button("Regenerate sky")) *c.requestRebake = true;
         ImGui::SameLine();
         ImGui::TextDisabled("last bake %.0f ms", c.skyBakeMs);
+        if (c.skyDirty) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Sky rebakes when you release the control (~%.0f ms)", c.skyBakeMs);
         sliderLog("Sky brightness", &s.skyBrightness, 0.05f, 10.0f);
         sliderLog("Galaxy brightness", &s.galaxyBrightness, 0.05f, 10.0f);
         sliderLog("Milky Way", &s.milkyWayBrightness, 0.0f + 0.01f, 10.0f);
@@ -202,7 +212,7 @@ void Ui::draw(UiContext& c) {
         ImGui::BulletText("Mouse: look      W/A/S/D: move      Space / Ctrl: up / down");
         ImGui::BulletText("Q / E: roll      Shift: 5x boost      Scroll: speed");
         ImGui::BulletText("1-4: bookmarks   R: reset view   O: auto-orbit   L: toggle lensing");
-        ImGui::BulletText("Tab: mouse capture   H: hide panel   P: pause disk   Esc: quit");
+        ImGui::BulletText("Tab: mouse capture   H: hide panel   P: pause disk   Esc: release mouse / quit");
         ImGui::BulletText("F2: screenshot   F3: cinematic capture   F5: reload shaders");
     }
     ImGui::End();

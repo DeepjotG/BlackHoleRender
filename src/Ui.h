@@ -24,17 +24,20 @@ struct UiContext {
     bool* requestRebake = nullptr;
     bool* requestSave = nullptr;
     bool mouseCaptured = false;
+    bool skyDirty = false;
 };
 
 class Ui {
 public:
     bool init(GLFWwindow* window);
     void shutdown();
-    void newFrame();
+    void newFrame(bool mouseCaptured);
+    void endFrame();   // when nothing is drawn this frame
     void draw(UiContext& ctx);
     void render();
     bool wantsKeyboard() const;
     bool wantsMouse() const;
+    bool anyItemActive() const;
 
 private:
     bool inited_ = false;

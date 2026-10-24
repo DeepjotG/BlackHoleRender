@@ -87,7 +87,16 @@ void Camera::update(float dt, const Input& in) {
         // Interpolate radius logarithmically so long flights feel even.
         float r0 = std::max(glm::length(fromPos_), kMinRadius), r1 = std::max(glm::length(toPos_), kMinRadius);
         glm::vec3 d0 = fromPos_ / glm::length(fromPos_), d1 = toPos_ / glm::length(toPos_);
-        glm::vec3 d = glm::normalize(glm::mix(d0, d1, e) + glm::vec3(1e-6f));
+        // Slerp the position direction: a normalised lerp concentrates the angular motion
+        // around the midpoint for near-antipodal end points and is undefined at 180 degrees.
+        glm::vec3 axis = glm::cross(d0, d1);
+        const float s = glm::length(axis);
+        const float ang = std::atan2(s, glm::dot(d0, d1));
+        glm::vec3 d = d0;
+        if (ang > 1e-5f) {
+            if (s < 1e-6f) axis = glm::cross(d0, std::abs(d0.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0));
+            d = glm::angleAxis(ang * e, axis / glm::length(axis)) * d0;
+        }
         float r = std::exp(glm::mix(std::log(r0), std::log(r1), e));
         pos_ = d * r;
         orient_ = glm::slerp(fromQ_, toQ_, e);
@@ -124,6 +133,10 @@ void Camera::update(float dt, const Input& in) {
         float k = 1.0f - std::exp(-dt * 7.0f);
         vel_ += (target - vel_) * k;
         pos_ += vel_ * dt;
+        // Snap inertia to exact rest once it is sub-pixel so the pose becomes bit-identical and
+        // progressive supersampling can start about a second sooner.
+        if (glm::dot(in.move, in.move) == 0.0f && glm::length(vel_) < 5e-3f * speedScale()) vel_ = glm::vec3(0.0f);
+        if (in.roll == 0.0f && std::abs(rollVel_) < 5e-3f) rollVel_ = 0.0f;
     }
 
     // Soft barrier outside the horizon: the static-observer camera cannot cross it.
@@ -138,7 +151,9 @@ void Camera::update(float dt, const Input& in) {
         pos_ = glm::normalize(pos_) * 20000.0f;
     }
 
-    moved_ = (glm::distance(prevPos, pos_) > 1e-7f * std::max(1.0f, r)) ||
+    moved_ = transitioning_ || autoOrbit_ || glm::dot(in.lookDelta, in.lookDelta) != 0.0f ||
+             glm::dot(vel_, vel_) != 0.0f || rollVel_ != 0.0f ||
+             (glm::distance(prevPos, pos_) > 1e-7f * std::max(1.0f, r)) ||
              (std::abs(glm::dot(prevQ, orient_)) < 1.0f - 1e-9f);
 }
 

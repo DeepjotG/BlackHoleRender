@@ -52,11 +52,21 @@ float diskNoise(float r, float phi, float yOverH) {
     float rep = max(1.0, floor(2.0 * uDiskNoiseScale + 0.5));   // integer azimuthal repeats -> seamless
     float lr = log(r) * 3.2 * uDiskNoiseScale;
     float yy = yOverH * 0.35;
-    vec3 c1 = vec3((phi - omega * t1) * (rep / TWO_PI), lr, yy);
-    vec3 c2 = vec3((phi - omega * t2) * (rep / TWO_PI), lr + 0.37, yy + 0.61);
+    // Disk angular momentum is along +y: gas at (r,0,0) moves toward -z, so phi = atan(z,x) decreases
+    // with time. Must match the axis passed to impactParameterAboutAxis in blackhole.frag.
+    vec3 c1 = vec3((phi + omega * t1) * (rep / TWO_PI), lr, yy);
+    vec3 c2 = vec3((phi + omega * t2) * (rep / TWO_PI), lr + 0.37, yy + 0.61);
     float n1 = texture(uNoise3d, c1).r;
     float n2 = texture(uNoise3d, c2).r;
     return mix(n1, n2, w2);
+}
+
+// Optical depth is invariant: the static-frame absorption coefficient equals the fluid-frame one
+// scaled by nu'/nu_static = lapseEm / (g * lapseCam). Blended by the Doppler slider.
+float opticalDepthScale(float r, float gPhys, float rcam) {
+    float lapseEm = sqrt(max(1.0 - 2.0 / r, 1e-4));
+    float lapseCam = sqrt(max(1.0 - 2.0 / rcam, 1e-4));
+    return mix(1.0, lapseEm / (gPhys * lapseCam), uDopplerStrength);
 }
 
 float diskRadialProfile(float r) {
@@ -86,11 +96,12 @@ void volumetricDiskStep(vec3 p, float r, float ds, float bAxis, float rcam, inou
     float dens = diskDensity(p, r, emit);
     if (dens < 1e-4) return;
     float T = uDiskPeakTemp * diskTempProfile(r) * mix(1.0, 0.85 + 0.3 * emit, 0.5);
-    float g = mix(1.0, redshiftFactor(r, bAxis, rcam), uDopplerStrength);
+    float gPhys = redshiftFactor(r, bAxis, rcam);
+    float g = mix(1.0, gPhys, uDopplerStrength);
     vec4 bb = blackbody(T * g);
     float inward = pow(uDiskInner / max(r, uDiskInner), 0.6);            // hotter, brighter towards the ISCO
     vec3 source = diskTint(bb.rgb) * (bb.a * uDiskBrightness * emit * inward);   // radiance of an optically thick column
-    float absorb = dens * uDiskOpacity;
+    float absorb = dens * uDiskOpacity * opticalDepthScale(r, gPhys, rcam);
     float a = 1.0 - exp(-absorb * ds);
     color += transmittance * source * a;
     transmittance *= 1.0 - a;
@@ -107,9 +118,10 @@ vec4 thinDiskSample(vec3 hit, float bAxis, float rcam) {
     float emit = mix(1.0, mix(0.22, 1.35, f * f), uDiskNoiseStrength);
     float dens = uDiskDensity * diskRadialProfile(r) * pattern;
     float T = uDiskPeakTemp * diskTempProfile(r) * mix(1.0, 0.85 + 0.3 * emit, 0.5);
-    float g = mix(1.0, redshiftFactor(r, bAxis, rcam), uDopplerStrength);
+    float gPhys = redshiftFactor(r, bAxis, rcam);
+    float g = mix(1.0, gPhys, uDopplerStrength);
     vec4 bb = blackbody(T * g);
-    float alpha = 1.0 - exp(-dens * uDiskOpacity * 0.6);
+    float alpha = 1.0 - exp(-dens * uDiskOpacity * 0.6 * opticalDepthScale(r, gPhys, rcam));
     vec3 radiance = diskTint(bb.rgb) * (bb.a * uDiskBrightness * emit);
     return vec4(radiance, alpha);
 }

@@ -19,6 +19,7 @@ struct Options {
     bool fullscreen = false;
     bool wayland = false;
     bool x11 = false;
+    bool glDebug = false;
     bool noUi = false;
     bool forceUi = false;
     bool noCapture = false;
@@ -78,6 +79,9 @@ private:
     double lastTime_ = 0.0;
     double simTime_ = 0.0;
     double reloadTimer_ = 0.0;
+    double skyDirtyFor_ = 0.0;
+    int lastDebugView_ = 0;
+    std::string appRoot_;
     int frameIndex_ = 0;
     int fbW_ = 0, fbH_ = 0;
     std::string lastFingerprint_;

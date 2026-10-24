@@ -35,7 +35,14 @@ nvidia-smi                                               # must now list the RTX
 ```
 
 Alternatively disable Secure Boot in the BIOS. Without this the app still runs on the
-Radeon iGPU (use the Low preset); `run.sh` detects the driver automatically.
+Radeon iGPU (the first run starts on the Medium preset; the choice is saved in
+`settings.ini` next to this README); `run.sh` detects the driver automatically.
+
+Optional desktop launcher:
+
+```bash
+install -Dm644 blackhole.desktop ~/.local/share/applications/blackhole.desktop
+```
 
 ## Performance
 
@@ -44,10 +51,10 @@ roughly five to six times faster, so expect High at well over 60 fps once its dr
 
 | Preset | Internal res | Steps | Disk | iGPU fps |
 |---|---|---|---|---|
-| Low | 50 % | 200 | thin | 98 |
-| Medium | 75 % | 300 | volumetric | 37 |
-| High (default) | 100 % | 450 | volumetric | 17 |
-| Ultra | 100 % | 700 | volumetric, fine | 11 |
+| Low | 50 % | 200 | thin | 162 |
+| Medium | 75 % | 300 | volumetric | 44 |
+| High (default) | 100 % | 450 | volumetric | 21 |
+| Ultra | 100 % | 700 | volumetric, fine | 14 |
 
 The renderer also supersamples progressively whenever the camera is still, so a paused view
 keeps sharpening for a few seconds on any preset. *Dynamic resolution* in the Quality panel
@@ -71,7 +78,7 @@ holds a target frame time by scaling the internal resolution.
 | H | Hide the panel |
 | F2 / F3 | Screenshot / cinematic 4K capture (24 accumulated samples) |
 | F5 | Reload shaders (they also hot-reload on save) |
-| Esc | Quit |
+| Esc | Release the mouse; quit when the mouse is already free |
 
 ## Command line
 

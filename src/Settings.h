@@ -77,7 +77,8 @@ struct Settings {
     static const char* presetName(int p);
     bool save(const std::string& path) const;
     bool load(const std::string& path);
-    std::string fingerprint() const;  // changes whenever any saved field changes
+    std::string fingerprint() const;       // changes whenever any saved field changes
+    std::string traceFingerprint() const;  // only fields that change the traced HDR image
 };
 
 }  // namespace bhs

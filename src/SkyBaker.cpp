@@ -89,10 +89,8 @@ void SkyBaker::createCubemap(int res) {
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    std::vector<float> zeros(static_cast<size_t>(res) * res * 3, 0.0f);
-    for (int f = 0; f < 6; ++f)
-        glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, 0, 0, res, res, GL_RGB, GL_FLOAT, zeros.data());
-    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    // Define every level without a host upload (a 4096 cube would otherwise push 1.2 GB of zeros).
+    for (int l = 0; l < levels; ++l) glClearTexImage(cube_, l, GL_RGB, GL_FLOAT, nullptr);
     glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
     res_ = res;
 }
@@ -247,7 +245,7 @@ void SkyBaker::bake(const Settings& s) {
         }
         glFinish();
     }
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);   // image stores must be visible to GenerateMipmap on every driver
     glUseProgram(0);
     glBindTexture(GL_TEXTURE_CUBE_MAP, cube_);
     glGenerateMipmap(GL_TEXTURE_CUBE_MAP);

@@ -43,6 +43,10 @@ void main() {
     }
     float bAxis = impactParameterAboutAxis(uCamPos, dir, vec3(0.0, 1.0, 0.0));
     float rEscMin = max(uDiskOuter * 1.25, 12.0);
+    // Rays with impact parameter well above b_crit never approach the photon sphere; their
+    // deflection is insensitive to the step length, so they may march up to 3x coarser.
+    // Near-critical rays (h < 6) keep the full uStepScale * r resolution the photon ring needs.
+    float farMul = clamp((h - 6.0) / 3.0, 1.0, 3.0);   // h = 0 when lensing is off -> 1.0
 
     vec3 color = vec3(0.0);
     float transmittance = 1.0;
@@ -62,13 +66,21 @@ void main() {
                 break;
             }
         }
-        float ds = max(uStepScale * r, 0.02);
+        float ds = max(uStepScale * r * farMul, 0.02);
         float rcyl = length(x.xz);
-        bool nearDisk = uDiskMode != DISK_NONE && rcyl > uDiskInner - 1.0 && rcyl < uDiskOuter + 1.0 &&
-                        abs(x.y) < diskSlabHalfHeight(rcyl) + ds;
-        if (nearDisk) ds = min(ds, uDiskStep);
+        bool nearDisk = false;
+        if (uDiskMode != DISK_NONE && rcyl > uDiskInner - 1.0 && rcyl < uDiskOuter + 1.0) {
+            float outside = abs(x.y) - diskSlabHalfHeight(rcyl);      // > 0: above/below the slab
+            if (outside <= 0.0) {
+                nearDisk = true;
+                if (uDiskMode == DISK_VOLUMETRIC) ds = min(ds, 6.0 * uDiskStep);   // sub-sampled below
+            } else {
+                // Land on the slab boundary instead of stepping over it.
+                ds = min(ds, max(uDiskStep, outside / (abs(v.y) / vlen + 2.5 * uDiskThickness)));
+            }
+        }
         float dt = ds / vlen;
-        vec3 x0 = x;
+        vec3 x0 = x, v0 = v;
         rk4Step(x, v, h2, dt);
         steps = i + 1;
 
@@ -81,10 +93,21 @@ void main() {
                 transmittance *= 1.0 - s.a;
             }
         } else if (uDiskMode == DISK_VOLUMETRIC && nearDisk) {
-            vec3 mid = 0.5 * (x0 + x);
-            float rm = length(mid.xz);
-            if (rm > uDiskInner - 0.5 && rm < uDiskOuter && abs(mid.y) < diskSlabHalfHeight(rm)) {
-                volumetricDiskStep(mid, rm, length(x - x0), bAxis, rcam, color, transmittance);
+            // Sample the disk along the cubic Hermite interpolant of the RK4 segment so one
+            // geodesic step can carry several (cheaper) disk samples.
+            float seg = length(x - x0);
+            int n = max(1, int(ceil(seg / uDiskStep)));
+            float sub = seg / float(n);
+            vec3 m0 = dt * v0, m1 = dt * v;
+            for (int k = 0; k < n; ++k) {
+                float t = (float(k) + 0.5) / float(n);
+                float t2 = t * t, t3 = t2 * t;
+                vec3 p = (2.0 * t3 - 3.0 * t2 + 1.0) * x0 + (t3 - 2.0 * t2 + t) * m0 +
+                         (-2.0 * t3 + 3.0 * t2) * x + (t3 - t2) * m1;
+                float rm = length(p.xz);
+                if (rm > uDiskInner - 0.5 && rm < uDiskOuter && abs(p.y) < diskSlabHalfHeight(rm))
+                    volumetricDiskStep(p, rm, sub, bAxis, rcam, color, transmittance);
+                if (transmittance < 0.004) break;
             }
         }
         if (transmittance < 0.004) { status = 3; break; }
@@ -94,6 +117,13 @@ void main() {
     // Sky. Derivatives must be taken in uniform control flow (after the loop).
     vec3 ddx = dFdx(escDir);
     vec3 ddy = dFdy(escDir);
+    vec3 ddx0 = dFdx(dir);
+    vec3 ddy0 = dFdy(dir);
+    // Quads straddling the shadow edge or the opaque disk silhouette mix escaped and
+    // non-escaped lanes; their derivatives are meaningless, so use the unlensed footprint there.
+    float esc = float(status == 1);
+    float escDx = dFdx(esc), escDy = dFdy(esc);
+    if (escDx != 0.0 || escDy != 0.0) { ddx = ddx0; ddy = ddy0; }
     vec3 sky = vec3(0.0);
     if (status == 1) sky = sampleSky(escDir, ddx, ddy, uPixelOmega0, rcam);
     color += transmittance * sky;
@@ -107,6 +137,16 @@ void main() {
     if (uDebugView == 1) {
         color = heatmap(float(steps) / float(uMaxSteps));
         if (status == 2) color *= 0.35;
+    } else if (uDebugView == 3) {
+        // NaN detector: red = non-finite escape direction / state, green = non-finite sky sample,
+        // blue = non-finite derivative, grey = fine (brightness = status).
+        bool badDir = any(isnan(escDir)) || any(isinf(escDir)) || any(isnan(x)) || any(isnan(v));
+        bool badSky = any(isnan(sky)) || any(isinf(sky));
+        bool badDer = any(isnan(ddx)) || any(isnan(ddy)) || any(isinf(ddx)) || any(isinf(ddy));
+        color = vec3(0.15 * float(status));
+        if (badDer) color = vec3(0.0, 0.0, 1.0);
+        if (badSky) color = vec3(0.0, 1.0, 0.0);
+        if (badDir) color = vec3(1.0, 0.0, 0.0);
     } else if (uDebugView == 2) {
         float omega = sqrt(max(dot(ddx, ddx) * dot(ddy, ddy) - dot(ddx, ddy) * dot(ddx, ddy), 1e-30));
         color = (status == 1) ? heatmap(0.5 + 0.12 * log2(omega / uPixelOmega0)) : vec3(0.0);
