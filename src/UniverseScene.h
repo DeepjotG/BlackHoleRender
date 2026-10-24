@@ -25,6 +25,7 @@ struct UniverseTarget {
     double radius = 0.0;      // M, sets the viewing distance
     int kind = 0;             // 0 star, 1 galaxy, 2 place, 3 planet
     std::string info;
+    float absMag = 0.0f;      // stars: absolute visual magnitude
 };
 
 class UniverseScene {
@@ -62,6 +63,7 @@ public:
 
     const std::vector<UniverseTarget>& targets() const { return targets_; }
     double nearestSurfaceM() const { return nearestSurfaceM_; }   // to stars / galaxy edges, M
+    double julianDate(double simSeconds) const { return jd0_ + simSeconds / 86400.0; }
     std::string nearestName() const { return nearestName_; }
     size_t starCount() const { return starCount_; }
     double lastGatherMs() const { return gatherMs_; }
@@ -116,6 +118,7 @@ private:
 
     std::vector<UniverseTarget> targets_;
     std::string status_;
+    double jd0_ = 0.0;           // Julian date when the simulation started (real universe)
 };
 
 }  // namespace bhs

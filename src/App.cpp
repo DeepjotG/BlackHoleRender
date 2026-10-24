@@ -517,6 +517,7 @@ void App::frame() {
         ctx.universeStatus = universe_.status().c_str();
         ctx.universeError = universeError_.c_str();
         ctx.uniStars = universe_.starCount();
+        ctx.simJulianDate = universe_.julianDate(simSeconds_);
         ui_.draw(ctx);
         ui_.render();
     } else {

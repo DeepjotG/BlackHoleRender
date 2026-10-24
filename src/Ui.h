@@ -49,6 +49,7 @@ struct UiContext {
     const char* universeStatus = "";
     const char* universeError = "";
     size_t uniStars = 0;
+    double simJulianDate = 0.0;
 };
 
 class Ui {

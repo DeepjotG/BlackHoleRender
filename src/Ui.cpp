@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 
 #include "BlackHoleSystem.h"
 #include "Bodies.h"
@@ -144,6 +146,27 @@ void Ui::drawMarkers(UiContext& c) {
         double dist;
         if (project(glm::dvec3(0.0), at, dist)) label(at, 0.0f, "black hole", std::max(dist - 2.0, 0.0), IM_COL32(255, 200, 140, 200));
     }
+    if (c.uniTargets && s.universeMode != 0) {
+        int drawn = 0;
+        for (const UniverseTarget& t : *c.uniTargets) {
+            ImVec2 at;
+            double dist;
+            if (!project(t.pos, at, dist)) continue;
+            bool show;
+            if (t.kind == 0) {
+                const double dPc = dist * mPerM / units::kParsec;
+                const double m = t.absMag + 5.0 * (std::log10(std::max(dPc, 1e-9)) - 1.0);
+                show = m < 1.6 || dist < 400.0 * t.radius;   // the brightest stars, or one you are visiting
+            } else {
+                const double ang = t.radius / std::max(dist, 1e-300);
+                show = ang > 0.004 && ang < 1.2;              // galaxies and places of a sensible apparent size
+            }
+            if (!show) continue;
+            const ImU32 col = t.kind == 0 ? IM_COL32(255, 235, 190, 190) : (t.kind == 1 ? IM_COL32(190, 200, 255, 190) : IM_COL32(200, 255, 210, 190));
+            label(at, 0.0f, t.name, dist, col);
+            if (++drawn >= 40) break;
+        }
+    }
 }
 
 void Ui::draw(UiContext& c) {
@@ -226,6 +249,19 @@ void Ui::draw(UiContext& c) {
         }
         ImGui::Text("1 s here = %s   elapsed %s%s", units::formatDuration(s.timeWarp).c_str(),
                     units::formatDuration(c.simSeconds).c_str(), s.paused ? "   [paused, P]" : "");
+        if (s.universeMode == 2 && c.simJulianDate > 0.0) {
+            const double unix = (c.simJulianDate - 2440587.5) * 86400.0;
+            if (unix > -6.2e10 && unix < 2.5e11) {   // gmtime handles roughly years 0..9999
+                const std::time_t tt = static_cast<std::time_t>(unix);
+                std::tm tmv{};
+                gmtime_r(&tt, &tmv);
+                char date[64];
+                std::strftime(date, sizeof date, "%Y-%m-%d %H:%M UTC", &tmv);
+                ImGui::TextDisabled("date in the simulation: %s", date);
+            } else {
+                ImGui::TextDisabled("date in the simulation: Julian day %.0f", c.simJulianDate);
+            }
+        }
         const double rc = cam.radius();
         ImGui::TextDisabled("your clock runs %s slower than a far-away clock (hovering at %.3g M)",
                             units::formatFactor(BlackHoleSystem::timeDilationStatic(rc)).c_str(), rc);
@@ -347,6 +383,8 @@ void Ui::draw(UiContext& c) {
             }
         }
         if (c.uniTargets && !c.uniTargets->empty()) {
+            if (ImGui::Button("Surprise me")) *c.goToRequest = (*c.uniTargets)[static_cast<size_t>(std::rand()) % c.uniTargets->size()].name;
+            ImGui::SameLine();
             ImGui::InputTextWithHint("##search", "search stars, galaxies, places", searchBuf_, sizeof searchBuf_);
             std::string needle(searchBuf_);
             std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });

@@ -98,6 +98,7 @@ float atmosphereFor(universe::PlanetLook l) {
 
 // ---------------------------------------------------------------------------------------------
 bool UniverseScene::init() {
+    jd0_ = orbits::julianDateNow();
     bool ok = true;
     for (int pass = 0; pass < 3; ++pass) {
         ShaderProgram& p = pass == 0 ? countProg_ : (pass == 1 ? scanProg_ : scatterProg_);
@@ -395,6 +396,7 @@ void UniverseScene::buildTargets(double simSeconds) {
         char buf[128];
         std::snprintf(buf, sizeof buf, "star, %.0f K, absolute magnitude %.1f", s.teff, s.absMag);
         t.info = buf;
+        t.absMag = s.absMag;
         targets_.push_back(t);
     }
     for (const universe::GalaxyRecord& g : content_.galaxies) {
@@ -489,8 +491,7 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
 
     // ---- solar system (real universe)
     if (!content_.bodies.empty()) {
-        static const double jd0 = orbits::julianDateNow();
-        const double T = (jd0 + simSeconds / units::kDay - 2451545.0) / 36525.0;
+        const double T = (julianDate(simSeconds) - 2451545.0) / 36525.0;
         const double Tn = T + 1.0 / 36525.0;   // one day later, for velocities
         for (const universe::OrbitingBody& ob : content_.bodies) {
             if (ob.hostStar < 0 || ob.hostStar >= static_cast<int32_t>(content_.stars.size())) continue;
