@@ -55,7 +55,9 @@ struct GalaxyModel {
 
     // Dust layer (follows the arms).
     double dustScaleHeightPc = 100.0;
-    double dustExtinctionPerKpc = 1.0;   // A_V per kpc in the midplane at R = diskScaleLength
+    double dustExtinctionPerKpc = 1.0;   // A_V per kpc of the exponential dust disk at R = diskScaleLength;
+                                         // inside a bar the disk keeps 25% of it, plus the bar's dust lanes
+                                         // (detail::GalaxyEval::dustMeanFactor() gives the azimuthal mean at R = h)
 
     // Colours (linear RGB, relative weights).
     glm::vec3 bulgeColor{1.0f, 0.80f, 0.58f};

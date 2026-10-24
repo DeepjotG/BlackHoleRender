@@ -2,6 +2,7 @@
 #define GALAXY_MODEL_GLSL
 // NOTE for the "invented" workflow worker: the lead implemented this module after your task stalled.
 // Do not overwrite these files; finish with a short report.
+// (Review fixes applied since: dust octaves divided by their local mean, signed pitch.)
 //
 // GPU twin of src/universe/GalaxyModel.cpp (detail::GalaxyEval::sampleLocal). The constants come
 // from GalaxyEval::pack; every formula here must match the C++ one (tests/galaxy_model_tests.cpp and
@@ -30,11 +31,12 @@ float gmLattice(ivec3 c, uint salt) {
     uint h = uint(c.x) * 0x8da6b343u + uint(c.y) * 0xd8163841u + uint(c.z) * 0xcb1ab31fu + salt * 0x165667b1u;
     return float(pcg(h)) * (2.0 / 4294967296.0) - 1.0;
 }
-// Value noise; the lattice's y index is wrapped by `mask` (period mask + 1; -1 = no wrap).
-float gmNoiseM(vec3 p, uint salt, int mask) {
+// Value noise; the lattice's y index is wrapped by `mask` (period mask + 1; -1 = no wrap). `u`
+// receives the interpolation weights (quintic fade of the fractions).
+float gmNoiseMU(vec3 p, uint salt, int mask, out vec3 u) {
     vec3 i = floor(p);
     vec3 f = p - i;
-    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     ivec3 c = ivec3(i);
     int y0 = c.y & mask, y1 = (c.y + 1) & mask;
     float a = gmLattice(ivec3(c.x, y0, c.z), salt), b = gmLattice(ivec3(c.x + 1, y0, c.z), salt);
@@ -43,8 +45,33 @@ float gmNoiseM(vec3 p, uint salt, int mask) {
     float gg = gmLattice(ivec3(c.x, y1, c.z + 1), salt), hh = gmLattice(ivec3(c.x + 1, y1, c.z + 1), salt);
     return mix(mix(mix(a, b, u.x), mix(cc, d, u.x), u.y), mix(mix(e, ff, u.x), mix(gg, hh, u.x), u.y), u.z);
 }
+float gmNoiseM(vec3 p, uint salt, int mask) { vec3 u; return gmNoiseMU(p, salt, mask, u); }
 float gmNoise(vec3 p, uint salt) { return gmNoiseM(p, salt, -1); }
 float gmLmgf(float s) { return s * s * (0.0815444 + s * (-0.0020730 - 0.00011765 * s)); }
+// Local mean of exp(s n) at fade weights u: prod over the 8 corners of sinh(s w) / (s w), with the
+// series of sinh(t) / t to t^12 (detail::noiseNormExact).
+float gmSinhc(float x) {   // x = t^2
+    return 1.0 + x * (1.0 / 6.0 + x * (1.0 / 120.0 + x * (1.0 / 5040.0 + x * (1.0 / 362880.0 +
+           x * (1.0 / 39916800.0 + x * (1.0 / 6227020800.0))))));
+}
+float gmNormExact(vec3 u, float s) {
+    vec3 a0 = 1.0 - u;
+    float p = 1.0;
+    for (int c = 0; c < 8; ++c) {
+        float t = s * ((c & 1) != 0 ? u.x : a0.x) * ((c & 2) != 0 ? u.y : a0.y) * ((c & 4) != 0 ? u.z : a0.z);
+        p *= gmSinhc(t * t);
+    }
+    return p;
+}
+// log E[exp(s n)] at fade weights u for weak octaves: series of log(sinh t / t) to t^8 with per-axis
+// sums of powers of the weights (detail::noiseLmgfLocal).
+float gmLmgfLocal(vec3 u, float s) {
+    vec3 a2 = u * u, b2 = (1.0 - u) * (1.0 - u), a4 = a2 * a2, b4 = b2 * b2;
+    vec3 q2 = a2 + b2, q4 = a4 + b4, q6 = a4 * a2 + b4 * b2, q8 = a4 * a4 + b4 * b4;
+    float p2 = q2.x * q2.y * q2.z, p4 = q4.x * q4.y * q4.z, p6 = q6.x * q6.y * q6.z, p8 = q8.x * q8.y * q8.z;
+    float x = s * s;
+    return x * (p2 / 6.0 + x * (-p4 / 180.0 + x * (p6 / 2835.0 - x * p8 / 37800.0)));
+}
 float gmSech2(float u) { float e = exp(-2.0 * abs(u)); float d = 1.0 + e; return 4.0 * e / (d * d); }
 float gmSmooth(float e0, float e1, float x) { float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t); }
 
@@ -73,7 +100,7 @@ void galaxySampleLod(in GalaxyGpu g, vec3 pKpc, float lod, out vec3 starLight, o
     float theta = R0 > 1e-6 ? atan(z, x) : 0.0;
     float psi = g.data[8].x * (theta - (log(R) - g.data[8].z) * g.data[8].y - g.data[8].w);
     float armK = g.data[9].x;
-    float A = pow(max(0.5 + 0.5 * cos(psi), 0.0), armK);
+    float A = pow(abs(cos(0.5 * psi)), 2.0 * armK);   // ((1 + cos psi) / 2)^k without cancellation
     float cutR = g.data[11].x;
     float cut = 1.0 - gmSmooth(0.9 * cutR, 1.1 * cutR, R);
     vec3 off = vec3(float(pcg(uint(g.data[13].w) * 3u + 1u)), float(pcg(uint(g.data[13].w) * 3u + 2u)),
@@ -91,7 +118,8 @@ void galaxySampleLod(in GalaxyGpu g, vec3 pKpc, float lod, out vec3 starLight, o
         float thU = theta - (log(R) - g.data[8].z) * g.data[8].y;
         float P1 = g.data[15].w;
         Q1 = vec3(log(Rc) * armK1, thU * (P1 / 6.28318530717959), y * invLamY * 0.7) + off;
-        lam1 = (6.28318530717959 / (P1 * g.data[8].y * sqrt(1.0 + 1.0 / (g.data[8].y * g.data[8].y)))) * Rc;
+        float itp = abs(g.data[8].y);   // |1 / tan(pitch)|: across-arm cell = 2 pi R |sin(pitch)| / P1
+        lam1 = (6.28318530717959 / (P1 * itp * sqrt(1.0 + 1.0 / (itp * itp)))) * Rc;
         mask1 = int(P1) - 1;
         mask2 = 2 * int(P1) - 1;
     } else {
@@ -144,14 +172,32 @@ void galaxySampleLod(in GalaxyGpu g, vec3 pKpc, float lod, out vec3 starLight, o
         float wd5 = clamp(2.0 - 8.0 * lod * invLamD, 0.0, 1.0);
         float s1 = ampD * 0.5 * wy1, s2 = ampD * 0.3 * wy2, s3 = ampD * 0.2 * wd3, s4 = ampD * 0.15 * wd4, s5 = ampD * 0.1 * wd5;
         vec3 Pd = xyz * invLamD + off * 0.37;
-        float sum = 0.0;
-        if (wy1 > 0.0) sum += s1 * gmNoiseM(Q1 + vec3(3.1, 7.7, 1.3), 21u, mask1);
-        if (wy2 > 0.0) sum += s2 * gmNoiseM(Q2 + vec3(1.7, 9.2, 4.4), 22u, mask2);
-        if (wd3 > 0.0) sum += s3 * gmNoise(Pd, 23u);
-        if (wd4 > 0.0) sum += s4 * gmNoise(Pd * 2.0 + vec3(5.3, 1.9, 7.2), 24u);
-        if (wd5 > 0.0) sum += s5 * gmNoise(Pd * 4.0 + vec3(2.6, 8.4, 3.7), 25u);
-        float clumpD = exp(sum - gmLmgf(s1) - gmLmgf(s2) - gmLmgf(s3) - gmLmgf(s4) - gmLmgf(s5));
-        float Ad = pow(max(0.5 + 0.5 * cos(psi - 0.55), 0.0), 1.6 * armK);
+        // Each octave divided by its local mean: exactly for the two strong ones, through the local
+        // variance for the weak ones (GalaxyModel_internal.h).
+        float sum = 0.0, norm = 1.0, lm = 0.0;
+        vec3 u;
+        if (wy1 > 0.0) {
+            sum += s1 * gmNoiseMU(Q1 + vec3(3.1, 7.7, 1.3), 21u, mask1, u);
+            norm *= gmNormExact(u, s1);
+        }
+        if (wy2 > 0.0) {
+            sum += s2 * gmNoiseMU(Q2 + vec3(1.7, 9.2, 4.4), 22u, mask2, u);
+            norm *= gmNormExact(u, s2);
+        }
+        if (wd3 > 0.0) {
+            sum += s3 * gmNoiseMU(Pd, 23u, -1, u);
+            lm += gmLmgfLocal(u, s3);
+        }
+        if (wd4 > 0.0) {
+            sum += s4 * gmNoiseMU(Pd * 2.0 + vec3(5.3, 1.9, 7.2), 24u, -1, u);
+            lm += gmLmgfLocal(u, s4);
+        }
+        if (wd5 > 0.0) {
+            sum += s5 * gmNoiseMU(Pd * 4.0 + vec3(2.6, 8.4, 3.7), 25u, -1, u);
+            lm += gmLmgfLocal(u, s5);
+        }
+        float clumpD = exp(sum - lm - log(norm));
+        float Ad = pow(abs(cos(0.5 * (psi - 0.55))), 3.2 * armK);
         float barLen = barred ? 1.25 / g.data[14].z : 0.0;
         float inner = barred ? 0.25 + 0.75 * gmSmooth(0.5 * barLen, barLen, R) : 1.0;
         float vert = gmSech2(y * g.data[13].z);

@@ -1,5 +1,7 @@
 // NOTE for the "invented" workflow worker: the lead implemented this module after your task stalled.
 // Do not overwrite these files; finish with a short report.
+// (Review fixes applied since: dust octaves divided by their local mean, signed pitch, sanitised
+// parameters.)
 //
 // GalaxyModel: CPU evaluation and GPU packing (see GalaxyModel_internal.h for the component model
 // and shaders/galaxy_model.glsl for the GPU twin, which must stay formula-for-formula identical).
@@ -46,7 +48,50 @@ float latticeValue(int32_t x, int32_t y, int32_t z, uint32_t salt) {
 }
 }  // namespace
 
-double boundRadiusKpc(const GalaxyModel& m) {
+GalaxyModel sanitized(const GalaxyModel& in) {
+    GalaxyModel m = in;
+    const GalaxyModel d{};
+    const auto fix = [](double& v, double def) {
+        if (!std::isfinite(v)) v = def;
+    };
+    const auto fixVec = [](glm::dvec3& v, const glm::dvec3& def) {
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) v = def;
+    };
+    const auto fixColor = [](glm::vec3& v, const glm::vec3& def) {
+        if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) v = def;
+    };
+    fixVec(m.center, d.center);
+    fixVec(m.normal, d.normal);
+    fixVec(m.major, d.major);
+    fix(m.stellarMassSolar, d.stellarMassSolar);
+    fix(m.luminositySolar, d.luminositySolar);
+    fix(m.diskScaleLengthPc, d.diskScaleLengthPc);
+    fix(m.diskScaleHeightPc, d.diskScaleHeightPc);
+    fix(m.diskCutoffPc, d.diskCutoffPc);
+    fix(m.bulgeMassFraction, d.bulgeMassFraction);
+    fix(m.bulgeRadiusPc, d.bulgeRadiusPc);
+    fix(m.bulgeFlattening, d.bulgeFlattening);
+    fix(m.barLengthPc, d.barLengthPc);
+    fix(m.barAxisRatio, d.barAxisRatio);
+    fix(m.barAngleDeg, d.barAngleDeg);
+    fix(m.armPitchDeg, d.armPitchDeg);
+    fix(m.armRefRadiusPc, d.armRefRadiusPc);
+    fix(m.armPhaseDeg, d.armPhaseDeg);
+    fix(m.armWidth, d.armWidth);
+    fix(m.armContrast, d.armContrast);
+    fix(m.dustScaleHeightPc, d.dustScaleHeightPc);
+    fix(m.dustExtinctionPerKpc, d.dustExtinctionPerKpc);
+    fix(m.ellipticalRadiusPc, d.ellipticalRadiusPc);
+    fix(m.ellipticalAxisRatio, d.ellipticalAxisRatio);
+    fixColor(m.bulgeColor, d.bulgeColor);
+    fixColor(m.diskColor, d.diskColor);
+    fixColor(m.armColor, d.armColor);
+    fixColor(m.hiiColor, d.hiiColor);
+    return m;
+}
+
+double boundRadiusKpc(const GalaxyModel& in) {
+    const GalaxyModel m = sanitized(in);
     const double kpc = 1e-3;
     const double h = std::max(m.diskScaleLengthPc, 1.0) * kpc;
     if (m.type == GalaxyType::Elliptical) return 20.0 * std::max(m.ellipticalRadiusPc, 1.0) * kpc / 1.8153;
@@ -63,9 +108,10 @@ uint32_t pcgHash(uint32_t v) {
     return (word >> 22u) ^ word;
 }
 
-float valueNoiseWrapY(float px, float py, float pz, uint32_t salt, int32_t mask) {
+float valueNoiseWrapY(float px, float py, float pz, uint32_t salt, int32_t mask, glm::vec3* fadeOut) {
     const float ix = std::floor(px), iy = std::floor(py), iz = std::floor(pz);
     const float ux = fade(px - ix), uy = fade(py - iy), uz = fade(pz - iz);
+    if (fadeOut) *fadeOut = glm::vec3(ux, uy, uz);
     const int32_t x = static_cast<int32_t>(ix), z = static_cast<int32_t>(iz);
     const int32_t y0 = static_cast<int32_t>(iy) & mask, y1 = (static_cast<int32_t>(iy) + 1) & mask;
     const float a = latticeValue(x, y0, z, salt), b = latticeValue(x + 1, y0, z, salt);
@@ -77,7 +123,37 @@ float valueNoiseWrapY(float px, float py, float pz, uint32_t salt, int32_t mask)
 
 float valueNoise(float px, float py, float pz, uint32_t salt) { return valueNoiseWrapY(px, py, pz, salt, -1); }
 
-GalaxyEval::GalaxyEval(const GalaxyModel& model) : m_(model) {
+double noiseNormExact(const glm::vec3& u, double s) {
+    // sinh(t) / t = sum_k t^(2k) / (2k+1)!, all terms positive (no cancellation); to t^12.
+    const auto sinhc = [](double x) {   // x = t^2
+        return 1.0 + x * (1.0 / 6.0 + x * (1.0 / 120.0 + x * (1.0 / 5040.0 + x * (1.0 / 362880.0 +
+               x * (1.0 / 39916800.0 + x * (1.0 / 6227020800.0))))));
+    };
+    const double ax[2] = {1.0 - u.x, u.x}, ay[2] = {1.0 - u.y, u.y}, az[2] = {1.0 - u.z, u.z};
+    double p = 1.0;
+    for (int c = 0; c < 8; ++c) {
+        const double t = s * ax[c & 1] * ay[(c >> 1) & 1] * az[(c >> 2) & 1];
+        p *= sinhc(t * t);
+    }
+    return p;
+}
+
+double noiseLmgfLocal(const glm::vec3& u, double s) {
+    // sum_c log(sinh(s w_c) / (s w_c)) = sum_k c_k s^(2k) sum_c w_c^(2k), with
+    // c = 1/6, -1/180, 1/2835, -1/37800 and sum_c w_c^(2k) = prod over the axes of (1-u)^(2k) + u^(2k).
+    double p2 = 1.0, p4 = 1.0, p6 = 1.0, p8 = 1.0;
+    for (int i = 0; i < 3; ++i) {
+        const double a = u[i], b = 1.0 - a, a2 = a * a, b2 = b * b, a4 = a2 * a2, b4 = b2 * b2;
+        p2 *= a2 + b2;
+        p4 *= a4 + b4;
+        p6 *= a4 * a2 + b4 * b2;
+        p8 *= a4 * a4 + b4 * b4;
+    }
+    const double x = s * s;
+    return x * (p2 / 6.0 + x * (-p4 / 180.0 + x * (p6 / 2835.0 - x * p8 / 37800.0)));
+}
+
+GalaxyEval::GalaxyEval(const GalaxyModel& model) : m_(sanitized(model)) {
     // Orthonormal disk frame.
     glm::dvec3 n = glm::length(m_.normal) > 1e-12 ? glm::normalize(m_.normal) : glm::dvec3(0.0, 1.0, 0.0);
     glm::dvec3 mj = m_.major - glm::dot(m_.major, n) * n;
@@ -137,9 +213,12 @@ GalaxyEval::GalaxyEval(const GalaxyModel& model) : m_(model) {
     const double normY = 1.0 / (2.0 * kPi * hy * hy * youngMass * 4.0 * hzy);
     const double normH = 1.0 / (2.0 * kPi * hy * hy * youngMass * 4.0 * hzh);
 
-    // Arms.
+    // Arms. The pitch keeps its sign (pitch < 0: arms wind clockwise outward); |pitch| is kept in
+    // [2, 60] degrees.
     armM_ = std::max(m_.armCount, 1);
-    invTanP_ = 1.0 / std::tan(std::clamp(m_.armPitchDeg, 2.0, 60.0) * kPi / 180.0);
+    const double pitchAbs = std::clamp(std::abs(m_.armPitchDeg), 2.0, 60.0) * kPi / 180.0;
+    const double sinP = std::sin(pitchAbs);
+    invTanP_ = (m_.armPitchDeg < 0.0 ? -1.0 : 1.0) / std::tan(pitchAbs);
     lnRef_ = std::log(armRef);
     phase_ = m_.armPhaseDeg * kPi / 180.0;
     const double w = std::clamp(m_.armWidth, 0.05, 0.95);
@@ -168,7 +247,6 @@ GalaxyEval::GalaxyEval(const GalaxyModel& model) : m_(model) {
     // lattice cell is 2 pi R sin(pitch) / P across the arm and R / (K1 sin(pitch)) along it; P (a power
     // of two, so the pattern wraps seamlessly) makes cells ~5% of R across, K1 stretches them 1.5x.
     if (cm1 > 0.3 && !irr) {
-        const double sinP = std::sin(std::clamp(m_.armPitchDeg, 2.0, 60.0) * kPi / 180.0);
         armP1_ = std::clamp(std::exp2(std::round(std::log2(2.0 * kPi * sinP / 0.05))), 4.0, 64.0);
         armK1_ = armP1_ / (2.0 * kPi * 1.5 * sinP * sinP);
         armLam_ = 2.0 * kPi * sinP / armP1_;
@@ -201,11 +279,29 @@ GalaxyEval::GalaxyEval(const GalaxyModel& model) : m_(model) {
         normBar = 1.0 / (1.81280495 * ab * kPi * bb * cb);
     }
 
-    // Dust.
+    // Dust: dustExtinctionPerKpc normalises the exponential dust disk at R = h; a bar clears the disk
+    // inside its length to 25% and adds lanes along its leading edges (see GalaxyModel_internal.h).
     const double hzd = std::max(m_.dustScaleHeightPc, 1.0) * kpc;
     invTwoHzd_ = 1.0 / (2.0 * hzd);
     dustT0_ = std::max(m_.dustExtinctionPerKpc, 0.0) / 1000.0 / 1.086;
-    laneT_ = barred_ ? 2.5 * dustT0_ * std::exp(-(0.5 * barLen - h) / h) : 0.0;
+    const double laneRel = barred_ ? 2.5 * std::exp(-(0.5 * barLen - h) / h) : 0.0;
+    laneT_ = laneRel * dustT0_;
+    dustMean_ = 1.0;
+    if (barred_) {
+        // Azimuthal mean at R = h (arms average to 1 around every circle). Lanes: Gaussian strips of
+        // width w = 0.22 b_bar along the bar axis at |zb| = b_bar / 2; the circle crosses each once, at
+        // |xb| = xc where dzb / dtheta = xc, so their mean is laneRel w / (sqrt(pi) xc).
+        const double innerH = 0.25 + 0.75 * smooth(0.5 * barLen, barLen, h);
+        const double bb = 1.0 / invBb_, laneW = 0.22 * bb;
+        const double xc2 = h * h - 0.25 * bb * bb;
+        double lanes = 0.0;
+        if (xc2 > laneW * laneW) {
+            const double xc = std::sqrt(xc2);
+            lanes = laneRel * laneW / (std::sqrt(kPi) * xc) * smooth(0.15 * barLen, 0.35 * barLen, xc) *
+                    (1.0 - smooth(0.85 * barLen, 1.05 * barLen, xc));
+        }
+        dustMean_ = innerH + lanes;
+    }
 
     // Prefactors (shape functions are in kpc^-3; 1e-9 converts to pc^-3).
     eOld_ = 1e-9 * lu * fOld * wOld * normOld * unitLuminance(m_.diskColor);
@@ -247,7 +343,7 @@ void GalaxyEval::sampleLocal(double x, double y, double z, double lod, int what,
 
     const double theta = R0 > 1e-6 ? std::atan2(z, x) : 0.0;
     const double psi = armM_ * (theta - (std::log(R) - lnRef_) * invTanP_ - phase_);
-    const double A = std::pow(std::max(0.5 + 0.5 * std::cos(psi), 0.0), armK_);
+    const double A = std::pow(std::abs(std::cos(0.5 * psi)), 2.0 * armK_);   // ((1 + cos psi) / 2)^k without cancellation
     const double cut = 1.0 - smooth(0.9 * cutR_, 1.1 * cutR_, R);
 
     // Clump noise: arm-aligned coordinates for spirals (seamless around the galaxy), plain 3D
@@ -317,14 +413,35 @@ void GalaxyEval::sampleLocal(double x, double y, double z, double lod, int what,
         const double s1 = ampD_ * 0.5 * wy1, s2 = ampD_ * 0.3 * wy2, s3 = ampD_ * 0.2 * wd3, s4 = ampD_ * 0.15 * wd4,
                      s5 = ampD_ * 0.1 * wd5;
         const glm::dvec3 Pd = glm::dvec3(x, y, z) * invLamD_ + noiseOff_ * 0.37;
-        double sum = 0.0;
-        if (wy1 > 0.0) sum += s1 * noiseAt(Q1 + glm::dvec3(3.1, 7.7, 1.3), 21u, mask1);
-        if (wy2 > 0.0) sum += s2 * noiseAt(Q2 + glm::dvec3(1.7, 9.2, 4.4), 22u, mask2);
-        if (wd3 > 0.0) sum += s3 * noiseAt(Pd, 23u, -1);
-        if (wd4 > 0.0) sum += s4 * noiseAt(Pd * 2.0 + glm::dvec3(5.3, 1.9, 7.2), 24u, -1);
-        if (wd5 > 0.0) sum += s5 * noiseAt(Pd * 4.0 + glm::dvec3(2.6, 8.4, 3.7), 25u, -1);
-        const double clumpD = std::exp(sum - lmgf(s1) - lmgf(s2) - lmgf(s3) - lmgf(s4) - lmgf(s5));
-        const double Ad = std::pow(std::max(0.5 + 0.5 * std::cos(psi - 0.55), 0.0), 1.6 * armK_);
+        // Each octave is divided by its local mean (see GalaxyModel_internal.h): exactly for the two
+        // strong ones, through the local variance for the weak ones.
+        const auto octave = [](const glm::dvec3& q, uint32_t salt, int32_t mask, glm::vec3& u) {
+            return static_cast<double>(valueNoiseWrapY(static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z), salt, mask, &u));
+        };
+        double sum = 0.0, norm = 1.0, lm = 0.0;
+        glm::vec3 u;
+        if (wy1 > 0.0) {
+            sum += s1 * octave(Q1 + glm::dvec3(3.1, 7.7, 1.3), 21u, mask1, u);
+            norm *= noiseNormExact(u, s1);
+        }
+        if (wy2 > 0.0) {
+            sum += s2 * octave(Q2 + glm::dvec3(1.7, 9.2, 4.4), 22u, mask2, u);
+            norm *= noiseNormExact(u, s2);
+        }
+        if (wd3 > 0.0) {
+            sum += s3 * octave(Pd, 23u, -1, u);
+            lm += noiseLmgfLocal(u, s3);
+        }
+        if (wd4 > 0.0) {
+            sum += s4 * octave(Pd * 2.0 + glm::dvec3(5.3, 1.9, 7.2), 24u, -1, u);
+            lm += noiseLmgfLocal(u, s4);
+        }
+        if (wd5 > 0.0) {
+            sum += s5 * octave(Pd * 4.0 + glm::dvec3(2.6, 8.4, 3.7), 25u, -1, u);
+            lm += noiseLmgfLocal(u, s5);
+        }
+        const double clumpD = std::exp(sum - lm - std::log(norm));
+        const double Ad = std::pow(std::abs(std::cos(0.5 * (psi - 0.55))), 3.2 * armK_);
         const double inner = barred_ ? 0.25 + 0.75 * smooth(0.5 * barLen_, barLen_, R) : 1.0;
         const double vert = sech2(y * invTwoHzd_);
         s.tau = dustT0_ * std::exp(1.0 - R * invH_) * cut * inner * vert * (1.0 + dustCm1_ * Ad) * dustNorm_ * clumpD;

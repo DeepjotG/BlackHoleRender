@@ -17,7 +17,17 @@
 //   dust         exponential layer, concentrated in lanes on the inner (concave) edge of the arms
 //                and along the leading edges of the bar, with filamentary clumps
 // Clump factors are exp(s * noise) divided by their mean, so they never change totals, and every
-// noise octave fades to its mean when it is smaller than the requested level of detail.
+// noise octave fades to its mean when it is smaller than the requested level of detail. Value noise
+// is not stationary: its spread depends on the position inside a lattice cell, and the thin dust
+// layer sits at one lattice phase along the disk normal (fixed by the galaxy's seed). The dust
+// octaves are therefore divided by their local mean: the product over the 8 cell corners of
+// sinh(s w) / (s w) (noiseNormExact) for the two strong octaves, its logarithm's series (noiseLmgfLocal)
+// for the three weak ones, so the dust has its smooth mean at every point whatever the seed. The weak
+// young/old/HII clumps keep the global normalisation (their phase bias is a few per cent at most).
+//
+// Barred galaxies: the bar clears the dust inside its length to 25% (apart from the lanes along its
+// leading edges). dustExtinctionPerKpc normalises the underlying exponential dust disk, so the
+// azimuthal mean at R = h is dustExtinctionPerKpc * dustMeanFactor() (1 without a bar).
 #include <glm/glm.hpp>
 
 #include <cstdint>
@@ -30,9 +40,21 @@ namespace bhs::universe::detail {
 uint32_t pcgHash(uint32_t v);
 float valueNoise(float x, float y, float z, uint32_t salt);
 // Same, with the lattice's y index wrapped by `mask` (period mask + 1, a power of two; -1 = no wrap).
-float valueNoiseWrapY(float x, float y, float z, uint32_t salt, int32_t mask);
+// If `fadeOut` is given it receives the three interpolation weights (quintic fade of the fractions).
+float valueNoiseWrapY(float x, float y, float z, uint32_t salt, int32_t mask, glm::vec3* fadeOut = nullptr);
+// Local mean of exp(s * noise) at a point with fade weights u (the noise is sum_c w_c v_c with v_c
+// uniform in [-1, 1]): exactly prod_c sinh(s w_c) / (s w_c), via the series of sinh(t) / t to t^12
+// (relative error < 4e-5 for s <= 4). Same formula as gmNormExact in galaxy_model.glsl.
+double noiseNormExact(const glm::vec3& u, double s);
+// log E[exp(s n)] at that point for weak octaves: the series of log(sinh t / t) to t^8, whose
+// coefficients need only per-axis sums of powers of the weights (relative error of the mean < 5e-4
+// for s <= 1.6; the series diverges for s w >= pi). Same as gmLmgfLocal.
+double noiseLmgfLocal(const glm::vec3& u, double s);
 // Radius (kpc) containing the galaxy's light and dust; cheap (GalaxyModel::boundingRadiusPc uses it).
 double boundRadiusKpc(const GalaxyModel& m);
+// The model with every non-finite parameter replaced by the GalaxyModel default (GalaxyEval and
+// boundRadiusKpc evaluate this copy, so a NaN parameter never turns the whole galaxy into NaN).
+GalaxyModel sanitized(const GalaxyModel& m);
 
 // Statistics of valueNoise (4M samples; checked in tests/galaxy_model_tests.cpp).
 constexpr double kNoiseVariance = 0.16012;
@@ -65,7 +87,10 @@ public:
 
     double boundRadiusPc() const { return boundKpc_ * 1000.0; }
     GalaxyGpu pack(const glm::dvec3& viewpointMeters) const;
-    const GalaxyModel& model() const { return m_; }   // with an orthonormalised frame
+    const GalaxyModel& model() const { return m_; }   // sanitised, with an orthonormalised frame
+    // Azimuthal mean of the smooth midplane dust at R = h relative to the exponential dust disk that
+    // dustExtinctionPerKpc normalises: 1 without a bar; the bar's clearing plus its lanes with one.
+    double dustMeanFactor() const { return dustMean_; }
 
 private:
     GalaxyModel m_;
@@ -83,7 +108,7 @@ private:
     double armP1_ = 16.0;  // lattice cells around the galaxy (power of two) in arm-aligned coordinates
     double armLam_ = 0.08; // across-arm cell size / R, for the level of detail
     double cosB_ = 1.0, sinB_ = 0.0, invAb_ = 1.0, invBb_ = 1.0, invCb_ = 1.0, barLen_ = 0.0;
-    double laneT_ = 0.0, dustT0_ = 0.0, invTwoHzd_ = 1.0;
+    double laneT_ = 0.0, dustT0_ = 0.0, invTwoHzd_ = 1.0, dustMean_ = 1.0;
     uint32_t noiseSeed_ = 0;
     glm::dvec3 noiseOff_{0.0};
     // Prefactors: light (L_sun/pc^3) and stars (1/pc^3) per unit shape value.

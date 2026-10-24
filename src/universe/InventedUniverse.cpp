@@ -1,5 +1,7 @@
 // NOTE for the "invented" workflow worker: the lead implemented this module after your task stalled.
 // Do not overwrite these files; finish with a short report.
+// (Review fixes applied since: named places for the host's centre and the neighbour, the named
+// cluster is the nearest rich one, the black hole sits outside the bar.)
 //
 // Invented universe: a deterministic, seed-based universe around the black hole. A Milky-Way-sized
 // spiral hosts the black hole on one of its arms, with a few notable named stars nearby (the rest
@@ -24,6 +26,11 @@ constexpr double kPc = units::kParsec;
 constexpr double kKpc = 1e3 * units::kParsec;
 constexpr double kMpc = 1e6 * units::kParsec;
 constexpr double kLStar = 2.5e10;   // Schechter characteristic luminosity (L_sun, V band)
+constexpr double kMaxHostBarPc = 4500.0;       // host bar half-length cap
+constexpr double kBlackHoleBarMargin = 1.15;   // the black hole sits beyond 1.15 bar half-lengths
+// Groups and clusters nearer than the named rich cluster stay poor (no brightest cluster galaxy), so
+// the named one really is the nearest rich cluster.
+constexpr double kMaxRichnessNearer = 55.0;
 
 using detail::Rng;
 
@@ -192,7 +199,9 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
         h.diskCutoffPc = h.diskScaleLengthPc * r.range(5.2, 5.8);
         h.bulgeRadiusPc = r.range(650.0, 950.0);
         if (h.type == GalaxyType::BarredSpiral) {
-            h.barLengthPc = h.diskScaleLengthPc * r.range(1.3, 1.8);
+            // A long, Milky-Way-like bar, capped so that the black hole (outside it, below) still has
+            // room on an arm within 7 kpc of the centre.
+            h.barLengthPc = std::min(h.diskScaleLengthPc * r.range(1.3, 1.8), kMaxHostBarPc);
             h.armRefRadiusPc = h.barLengthPc;
             h.armPhaseDeg = h.barAngleDeg;
         } else {
@@ -208,7 +217,9 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
 
     // ---------------------------------------------------------------- the black hole, on an arm
     {
-        const double R = r.range(4.2, 6.8) * kKpc;
+        // Outside the bar (where the arms and the young disk start), 4.2 to 6.8 kpc from the centre.
+        const double rMinKpc = std::max(4.2, kBlackHoleBarMargin * host.barLengthPc / 1000.0);
+        const double R = r.range(rMinKpc, 6.8) * kKpc;
         const double armRef = std::max(host.armRefRadiusPc, 100.0) * kPc;
         const double invTanP = 1.0 / std::tan(host.armPitchDeg * kPi / 180.0);
         const double psi = r.range(-0.35, 0.55);   // on the arm, possibly by its inner dust lane
@@ -229,7 +240,7 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
         out.suggestedMassSolar = 0.0;
         out.blackHoleName = "Gargantua";
     }
-    out.places.push_back({"Galactic centre", host.center, 3000.0 * kPc});
+    out.places.push_back({"Galactic centre (" + hostName + ")", host.center, 3000.0 * kPc});
 
     // ---------------------------------------------------------------- notable stars nearby
     {
@@ -310,8 +321,10 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
         orient(g.model, r);
         g.model.center = host.center + randomUnit(r) * (r.range(0.7, 1.5) * kMpc);
         g.absMag = static_cast<float>(units::kSolarAbsMagV - 2.5 * std::log10(g.model.luminositySolar));
-        g.name = addName(out, names.proper() + " Galaxy");
+        const std::string neighbourName = names.proper() + " Galaxy";
+        g.name = addName(out, neighbourName);
         out.galaxies.push_back(g);
+        out.places.push_back({neighbourName + " (neighbour)", g.model.center, 0.5 * g.model.boundingRadiusPc() * kPc});
     }
 
     // ---------------------------------------------------------------- cosmic web
@@ -327,13 +340,14 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
         const std::string cn = names.proper() + " Cluster";
         out.places.push_back({cn, v.pos, 0.7 * kMpc});   // arrive ~1.4 Mpc from the core
         // Groups and clusters: richness ~ power law, positions uniform in volume beyond the local group.
+        const double virgoDist = glm::length(v.pos);
         while (nodes.size() < 1100) {
             Node n;
             const double d = rMax * std::cbrt(r.uniform());
             if (d < 4.0 * kMpc) continue;
             n.pos = randomUnit(r) * d;
             n.richness = 5.0 / std::pow(std::max(r.uniform(), 1e-6), 1.0 / 1.1);   // p(N) ~ N^-2.1
-            n.richness = std::min(n.richness, 400.0);
+            n.richness = std::min(n.richness, d < virgoDist ? kMaxRichnessNearer : 400.0);
             n.radius = 0.35 * kMpc * std::cbrt(n.richness / 5.0);
             nodes.push_back(n);
         }
@@ -417,7 +431,6 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
         g.name = addName(out, k < 25 ? names.proper() + (g.model.type == GalaxyType::Elliptical ? " Elliptical" : " Galaxy")
                                      : names.catalogue("IGC"));
     }
-    (void)hostName;
 }
 
 }  // namespace bhs::universe
