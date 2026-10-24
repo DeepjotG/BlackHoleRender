@@ -71,7 +71,7 @@ struct Settings {
     double timeWarp = 1.0;          // simulated seconds per real second
     bool planetsEnabled = true;     // planets orbiting the black hole
     bool showLabels = true;         // on-screen markers for planets and other targets
-    float gasBrightness = 20.0f;    // star-disruption gas: exposure (blackbody luminance relative to 6500 K)
+    float gasBrightness = 4.0f;     // star-disruption gas: exposure (blackbody luminance relative to 6500 K)
     float gasOpacity = 0.5f;        // star-disruption gas: absorption scale (translucent streams)
     float deepSky = 12.0f;          // 3D universe: long-exposure boost for distant galaxies (1 = true brightness)
 

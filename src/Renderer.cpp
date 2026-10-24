@@ -234,7 +234,9 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     // Star-disruption gas volumes on texture units 4..7.
     const int ng = (in.gas && in.gasCount > 0) ? std::min(in.gasCount, 4) : 0;
     p.set("uGasCount", ng);
-    p.set("uGasBrightness", s.gasBrightness);
+    // BHS_GAS_BRIGHTNESS overrides the setting (tuning captures).
+    static const float gbOverride = std::getenv("BHS_GAS_BRIGHTNESS") ? static_cast<float>(std::atof(std::getenv("BHS_GAS_BRIGHTNESS"))) : -1.0f;
+    p.set("uGasBrightness", gbOverride > 0.0f ? gbOverride : s.gasBrightness);
     for (int i = 0; i < 4; ++i) p.set("uGasLive[" + std::to_string(i) + "]", i < ng ? gasLive_[i] : 0);
     p.set("uGasOpacity", s.gasOpacity);
     for (int i = 0; i < 4; ++i) {
@@ -537,7 +539,7 @@ void Renderer::smoothGas(const FrameInput& in) {
             uint32_t peaks[4] = {0, 0, 0, 0};
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, readBuf);
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof peaks, peaks);
-            for (int i = 0; i < 4; ++i) gasLive_[i] = peaks[i] >= 2000u ? 1 : 0;   // >= 0.2 optical depth per texel somewhere
+            for (int i = 0; i < 4; ++i) gasLive_[i] = peaks[i] >= 2000u ? 1 : 0;   // visual weight >= 0.2 somewhere
             static int dbg = 0;
             if (std::getenv("BHS_DEBUG_TDE") && ++dbg % 30 == 0)
                 logInfo("    gas peaks (tau per texel x1e4): {} {} {} {} -> live {} {} {} {}", peaks[0], peaks[1], peaks[2], peaks[3], gasLive_[0],

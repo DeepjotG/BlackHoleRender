@@ -137,6 +137,8 @@ private:
     int watchPhase_ = 0;                 // star disruption camera: 0 off, 1 riding with the star, 2 pulled back
     glm::dvec3 watchPrev_{0.0};
     glm::dvec3 watchOffset_{0.0};        // camera position relative to the star while riding along
+    glm::dvec3 watchNormal_{0.0, 1.0, 0.0};   // the star's orbit normal
+    double watchLook_ = 0.15;           // how far from the debris towards the hole the camera aims (0..1)
     double watchPeriM_ = 0.0;             // disk flow clock in M, wrapped to the cross-fade period
     double reloadTimer_ = 0.0;
     double skyDirtyFor_ = 0.0;

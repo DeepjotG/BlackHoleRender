@@ -63,7 +63,15 @@ void gasSample(vec3 p, float ds, inout vec3 color, inout float transmittance) {
         // sparse particles in the coarse volumes stay faint smoke instead of a glowing haze.
         float texel = 2.0 * uGasBox[i].w / max(uGasRes[i], 1.0);
         float glow = max(g.b, 0.0) * clamp(max(g.r, 0.0) * texel / 0.5, 0.0, 1.0);
-        vec4 bb = blackbody(max(g.g, 0.0) * 1e4);
+        // Turbulent texture: the grids resolve the debris' shape but not its surface detail, so the
+        // emission and temperature get slowly drifting mottling (two noise cells per volume half-size).
+        // Absorption is left alone, keeping the simulated shape.
+        vec3 q = (p - uGasBox[i].xyz) / uGasBox[i].w;
+        float n1 = texture(uNoise3d, q * 0.5 + vec3(0.0, uTime * 0.01, 0.0)).r;
+        float n2 = texture(uNoise3d, q * 2.1 + vec3(0.37, 0.61 - uTime * 0.02, 0.11)).r;
+        float turb = smoothstep(0.25, 0.75, 0.65 * n1 + 0.35 * n2);   // billows (coarse) with filaments (fine)
+        glow *= 0.25 + 1.5 * turb;
+        vec4 bb = blackbody(max(g.g, 0.0) * 1e4 * (0.85 + 0.3 * turb));
         // Contract: color += T * (1 - exp(-r ds)) * B(T_gas) * b; T *= exp(-r ds). The brightest debris
         // (collision flares, ~100x the stream) is compressed, E / (1 + E / 8), so its structure stays
         // visible instead of burning out to white; dim stream gas is unchanged.

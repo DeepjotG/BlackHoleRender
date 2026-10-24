@@ -1,7 +1,7 @@
 #version 460 core
-// Largest optical depth across one texel of a star-disruption gas volume (r channel x texel size),
-// accumulated into peaks[uSlot] as fixed point (1e-4 units) with an atomic max. The renderer reads it
-// a frame later and skips volumes whose gas is too thin to see.
+// Largest visual weight of one texel of a star-disruption gas volume, accumulated into peaks[uSlot] as
+// fixed point (1e-4 units) with an atomic max. The renderer reads it a frame later and skips volumes
+// whose gas is too thin and cool to see.
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 uniform sampler3D uSrc;
 uniform int uRes;
@@ -12,6 +12,11 @@ layout(std430, binding = 6) buffer Peaks { uint peaks[]; };
 void main() {
     ivec3 p = ivec3(gl_GlobalInvocationID);
     if (any(greaterThanEqual(p, ivec3(uRes)))) return;
-    float tau = max(texelFetch(uSrc, p, 0).r, 0.0) * uTexel;
-    if (tau > 1e-4) atomicMax(peaks[uSlot], uint(min(tau, 4.0e5) * 1e4));
+    // Visual weight: optical depth, or for thin gas how brightly it glows (emission multiplier times a
+    // rough visible-brightness factor of its temperature), so thin but hot debris counts as visible.
+    vec4 g = texelFetch(uSrc, p, 0);
+    float tau = max(g.r, 0.0) * uTexel;
+    float hot = clamp((g.g / 0.65) * (g.g / 0.65), 0.05, 20.0);
+    float v = max(tau, tau * max(g.b, 0.0) * hot);
+    if (v > 1e-4) atomicMax(peaks[uSlot], uint(min(v, 4.0e5) * 1e4));
 }

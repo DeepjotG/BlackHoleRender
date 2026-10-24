@@ -796,9 +796,12 @@ void App::updateTde(double dtM) {
         const double k = 14.0;
         followName_.clear();
         flightTarget_.clear();
-        watchOffset_ = -vh * (k * R) + n * (0.45 * k * R) + out * (0.5 * k * R);
+        (void)k;
+        watchNormal_ = n;
+        watchLook_ = 0.15;
+        watchOffset_ = glm::normalize(out + n * 0.45 - vh * 0.35) * (14.0 * R);
         camera_.setPose(p + watchOffset_, camera_.orientation());
-        camera_.lookAt(p);
+        camera_.lookAt(glm::mix(p, glm::dvec3(0.0), 0.15));
         watchPhase_ = 1;
         watchPrev_ = p;
         watchPeriM_ = std::max(tde_.stats().pericenterM, 2.5);
@@ -888,6 +891,7 @@ void App::updateWorld(float dt, const Camera::Input& in) {
             // After release, aim at the centre of the finest gas volume (it tracks the debris and, unlike the
             // densest-debris position read back two frames late, is current).
             glm::dvec3 p = tde_.starPosition();
+            double extent = tde_.starRadiusM();
             if (!tde_.starIntact()) {
                 float finest = 1e30f;
                 for (int i = 0; i < tde_.volumeCount(); ++i)
@@ -895,9 +899,25 @@ void App::updateWorld(float dt, const Camera::Input& in) {
                         finest = tde_.volume(i).halfSize;
                         p = glm::dvec3(tde_.volume(i).center);
                     }
+                if (finest < 1e29f) extent = std::max(extent, static_cast<double>(finest));
             }
+            // On the far side of the star from the hole, a little above its orbit and behind it: the star
+            // (then its stretching debris) in front, the black hole looming behind. The offset follows
+            // the star's position smoothly, so the camera sweeps round it at pericentre, and backs off
+            // as the debris grows.
+            const glm::dvec3 out = glm::length(p) > 0.0 ? glm::normalize(p) : glm::dvec3(1.0, 0.0, 0.0);
+            const glm::dvec3 vel = tde_.starVelocity();
+            const glm::dvec3 vh = glm::length(vel) > 0.0 ? glm::normalize(vel) : glm::dvec3(0.0);
+            // Once torn apart, the debris stretches towards the hole: swing up above the orbit and back
+            // off to frame the stream side-on together with the hole.
+            const bool torn = !tde_.starIntact();
+            const double dist = torn ? std::max(4.0 * extent, 1.1 * glm::length(p)) : std::max(14.0 * tde_.starRadiusM(), 4.0 * extent);
+            const glm::dvec3 dirWant = torn ? glm::normalize(watchNormal_ * 0.85 + out * 0.45 - vh * 0.25)
+                                            : glm::normalize(out + watchNormal_ * 0.45 - vh * 0.35);
+            watchOffset_ = glm::mix(watchOffset_, dirWant * dist, 1.0 - std::exp(-static_cast<double>(dt) / 0.6));
+            watchLook_ = glm::mix(watchLook_, torn ? 0.4 : 0.15, 1.0 - std::exp(-static_cast<double>(dt) / 0.6));
             camera_.setPose(p + watchOffset_, camera_.orientation());
-            camera_.lookAt(p);
+            camera_.lookAt(glm::mix(p, glm::dvec3(0.0), watchLook_));
             watchPrev_ = p;
             const tde::TdeStats& st = tde_.stats();
             const double r = glm::length(p);
@@ -910,8 +930,12 @@ void App::updateWorld(float dt, const Camera::Input& in) {
             }
         } else if (watchPhase_ == 2 && !camera_.isTransitioning()) {
             // Keep the debris in frame from outside: dolly along the line of sight to about 1.2x the
-            // debris' distance from the hole (out while the stream flies away, back in at fallback).
-            const double target = std::clamp(1.2 * glm::length(tde_.starPosition()), 3.0 * watchPeriM_, 3e5);
+            // debris' distance from the hole while the stream flies away; once the bound debris falls back
+            // (accretion or stream-collision heating), come in close to watch the new disk form.
+            const tde::TdeStats& st = tde_.stats();
+            const bool fallback = st.accretedFraction > 1e-3 || st.dissipationRel > 0.05;
+            const double target = fallback ? std::max(30.0, 6.0 * watchPeriM_)
+                                           : std::clamp(1.2 * glm::length(tde_.starPosition()), 3.0 * watchPeriM_, 3e5);
             const double d = glm::length(camera_.position());
             if (d > 0.0) {
                 const double f = std::pow(target / d, std::min(1.0, 1.2 * static_cast<double>(dt)));
