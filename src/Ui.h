@@ -42,6 +42,7 @@ struct UiContext {
     std::string* goToRequest = nullptr;   // set to a target name to start a flight
     const char* nearestName = "";
     double nearestDist = 0.0;             // M, to the nearest surface
+    bool* turbo = nullptr;                // 1000x flight speed
     TdeControls* tde = nullptr;
     const tde::TdeStats* tdeStats = nullptr;
     bool tdeActive = false;

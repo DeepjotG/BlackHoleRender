@@ -345,6 +345,7 @@ void App::onKey(int key, int action, int) {
         case GLFW_KEY_O: camera_.setAutoOrbit(!camera_.autoOrbit()); break;
         case GLFW_KEY_P: settings_.paused = !settings_.paused; break;
         case GLFW_KEY_L: settings_.lensing = !settings_.lensing; break;
+        case GLFW_KEY_T: turbo_ = !turbo_; break;
         default: break;
     }
 }
@@ -510,6 +511,7 @@ void App::frame() {
         ctx.goToRequest = &goToRequest_;
         ctx.nearestName = nearestName_.c_str();
         ctx.nearestDist = nearestDist_;
+        ctx.turbo = &turbo_;
         ctx.tde = &tdeCtl_;
         ctx.tdeStats = &tde_.stats();
         ctx.tdeActive = tde_.active();
@@ -782,7 +784,7 @@ void App::updateWorld(float dt, const Camera::Input& in) {
 
     // Flight speed follows the distance to the nearest surface (horizon or planet).
     nearestDist_ = nearestSurfaceDistance(&nearestName_);
-    const double speed = 0.35 * camera_.baseSpeed * std::max(nearestDist_, 1e-12);
+    const double speed = 0.35 * camera_.baseSpeed * std::max(nearestDist_, 1e-12) * (turbo_ ? 1000.0 : 1.0);
     camera_.maxRadius = settings_.universeMode == 0 ? 20000.0 : 1e22;
     camera_.update(dt, in, speed);
     wasTransitioning_ = camera_.isTransitioning();

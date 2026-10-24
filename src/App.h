@@ -108,6 +108,7 @@ private:
     bool wasTransitioning_ = false;
     std::string goToRequest_;            // set by the UI
     std::string nearestName_;
+    bool turbo_ = false;                 // T: 1000x flight speed for crossing interstellar space
     double nearestDist_ = 0.0;
     GLuint targetFbo_ = 0;   // final framebuffer: 0, or the bridge's backbuffer
 

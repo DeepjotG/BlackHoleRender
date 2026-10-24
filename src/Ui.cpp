@@ -409,7 +409,9 @@ void Ui::draw(UiContext& c) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Stop")) c.followName->clear();
         }
+        if (c.turbo) ImGui::Checkbox("Turbo, 1000x (T)", c.turbo);
         ImGui::TextDisabled("Speed follows the distance to the nearest surface; scroll to change it, Shift = 5x.");
+        ImGui::TextDisabled("For long trips use the list above: flights cross any distance in a few seconds.");
     }
 
     // ---- quality ----
@@ -530,7 +532,7 @@ void Ui::draw(UiContext& c) {
         ImGui::BulletText("Mouse: look      W/A/S/D: move      Space / Ctrl: up / down");
         ImGui::BulletText("Q / E: roll      Shift: 5x boost      Scroll: speed");
         ImGui::BulletText("1-4: bookmarks   R: reset view   O: auto-orbit   L: toggle lensing");
-        ImGui::BulletText("Tab: mouse capture   H: hide panel   P: pause disk   Esc: release mouse / quit");
+        ImGui::BulletText("Tab: mouse capture   H: hide panel   P: pause   T: turbo   Esc: release mouse / quit");
         ImGui::BulletText("F2: screenshot   F3: cinematic capture   F5: reload shaders");
     }
     ImGui::End();
