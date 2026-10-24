@@ -88,12 +88,16 @@ void main() {
         float t0 = max(b - s, 0.0), t1 = b + s;
         if (t1 <= 0.0) continue;
         const int N = 72;
+        // Per-texel jitter of the sample positions turns step banding into fine noise, which the
+        // cubemap's mipmaps and the tracer's filtering average away.
+        float jitter = hash12(vec2(px) + vec2(float(uFace) * 1031.0, float(gi) * 577.0));
         float prevT = t0;
         for (int k = 1; k <= N; ++k) {
-            float f = float(k) / float(N);
+            float f = (float(k) - 0.5 + jitter) / float(N);
+            float fPrev = max((float(k) - 1.5 + jitter) / float(N), 0.0);
             float t = t0 + (t1 - t0) * f * f;          // denser sampling close to the viewer
-            float tm = 0.5 * (prevT + t);
-            float dtPc = (t - prevT) * 1000.0;
+            float tm = t;
+            float dtPc = (t - (t0 + (t1 - t0) * fPrev * fPrev)) * 1000.0;
             prevT = t;
             vec3 emis;
             float ext;
