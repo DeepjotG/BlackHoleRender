@@ -12,6 +12,14 @@ namespace bhs {
 class Camera;
 struct Settings;
 
+// One gas volume of the star-disruption simulation (see tde/TdeSim.h).
+struct GasVolumeRef {
+    GLuint texture = 0;
+    glm::vec3 center{0.0f};
+    float halfSize = 0.0f;
+    int resolution = 0;
+};
+
 struct FrameInput {
     const Camera* camera = nullptr;
     const Settings* settings = nullptr;
@@ -25,6 +33,8 @@ struct FrameInput {
     float extraGpuMs = 0.0f; // GPU work outside the renderer (bridge readback), for frame-time targets
     const std::vector<struct BodyGpu>* bodies = nullptr;
     bool farMode = false;    // camera far from the hole: straight rays
+    const GasVolumeRef* gas = nullptr;
+    int gasCount = 0;
     int debugView = 0;
 };
 
@@ -71,7 +81,9 @@ private:
     void compositePass(const FrameInput& in, const Target& hdr, GLuint dstFbo, int w, int h);
     void updateAutoExposure(const FrameInput& in, const Target& hdr);
 
-    ShaderProgram traceProg_, traceBodiesProg_, accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
+    // Tracer variants: with/without body code and with/without gas code.
+    ShaderProgram traceProg_, traceBodiesProg_, traceGasProg_, traceGasBodiesProg_;
+    ShaderProgram accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
     ShaderProgram& traceFor(const FrameInput& in);
     Target trace_, accum_[2], upscaled_, lumaProbe_, captureOut_;
     static constexpr int kMaxBloomLevels = 8;

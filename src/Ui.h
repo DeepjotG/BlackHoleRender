@@ -11,6 +11,8 @@ class Renderer;
 class BlackHoleSystem;
 struct BodyDesc;
 struct Settings;
+struct TdeControls;
+namespace tde { struct TdeStats; }
 
 struct UiContext {
     Settings* settings = nullptr;
@@ -39,6 +41,9 @@ struct UiContext {
     std::string* goToRequest = nullptr;   // set to a target name to start a flight
     const char* nearestName = "";
     double nearestDist = 0.0;             // M, to the nearest surface
+    TdeControls* tde = nullptr;
+    const tde::TdeStats* tdeStats = nullptr;
+    bool tdeActive = false;
 };
 
 class Ui {

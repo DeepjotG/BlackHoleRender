@@ -10,6 +10,8 @@
 #include "GpuBridge.h"
 #include "Renderer.h"
 #include "Settings.h"
+#include "TdeControls.h"
+#include "tde/TdeSim.h"
 #include "SkyBaker.h"
 #include "Ui.h"
 
@@ -85,6 +87,10 @@ private:
     DiskTextures diskTex_;
     Ui ui_;
     BlackHoleSystem bhSystem_;
+    tde::TdeSim tde_;
+    TdeControls tdeCtl_;
+    std::vector<GasVolumeRef> gasRefs_;
+    void updateTde(double dtM);
     std::vector<BodyDesc> bodies_;
     std::vector<BodyGpu> bodiesGpu_;
     double simSeconds_ = 0.0;            // simulated coordinate time since start (s)

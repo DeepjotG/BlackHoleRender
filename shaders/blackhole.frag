@@ -13,6 +13,12 @@
 #if BHS_BODIES
 #include "bodies.glsl"
 #endif
+#ifndef BHS_GAS
+#define BHS_GAS 1
+#endif
+#if BHS_GAS
+#include "gas.glsl"
+#endif
 
 in vec2 vUv;
 layout(location = 0) out vec4 fragColor;
@@ -164,6 +170,16 @@ void main() {
                 ds = min(ds, max(0.5 * (length(x - pr.xyz) - pr.w), 0.25 * pr.w));
             }
 #endif
+#if BHS_GAS
+            // Gas of a star being torn apart: fine steps inside its volumes; outside, land on the
+            // nearest volume instead of stepping over it.
+            float gasCell = gasCellSize(x);
+            if (gasCell > 0.0) ds = min(ds, max(1.5 * gasCell, 1e-6 * r));
+            else {
+                float te = gasEntryDistance(x, v / vlen);
+                if (te < ds) ds = max(te + 1e-4 * max(r, 1.0), 1e-6 * r);
+            }
+#endif
             float dt = ds / vlen;
             vec3 x0 = x, v0 = v;
             if (lensing) rk4Step(x, v, h2, dt);
@@ -197,6 +213,16 @@ void main() {
                     if (transmittance < 0.004) break;
                 }
             }
+#if BHS_GAS
+            {
+                float cellHere = gasCell > 0.0 ? gasCell : gasCellSize(x);
+                if (cellHere > 0.0 && seg > 0.0) {
+                    int n = clamp(int(ceil(seg / cellHere)), 1, 8);
+                    float sub = seg / float(n);
+                    for (int k = 0; k < n; ++k) gasSample(mix(x0, x, (float(k) + 0.5) / float(n)), sub, color, transmittance);
+                }
+            }
+#endif
             if (transmittance < 0.004) { status = 3; break; }
 
 #if BHS_BODIES

@@ -71,6 +71,8 @@ struct Settings {
     double timeWarp = 1.0;          // simulated seconds per real second
     bool planetsEnabled = true;     // planets orbiting the black hole
     bool showLabels = true;         // on-screen markers for planets and other targets
+    float gasBrightness = 1.0f;     // star-disruption gas: emission scale
+    float gasOpacity = 1.0f;        // star-disruption gas: absorption scale
 
     // ---- Camera ----
     float fovDeg = 60.0f;

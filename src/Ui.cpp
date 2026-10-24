@@ -17,6 +17,8 @@
 #include "Units.h"
 #include "Renderer.h"
 #include "Settings.h"
+#include "TdeControls.h"
+#include "tde/TdeSim.h"
 
 namespace bhs {
 
@@ -127,6 +129,12 @@ void Ui::drawMarkers(UiContext& c) {
             if (!project(b.pos, at, dist)) continue;
             const float rpx = static_cast<float>(std::atan(b.radius / dist) / tanHalf * 0.5 * ds.y);
             if (rpx > ds.y * 0.25f) continue;   // filling the view: no marker needed
+            if (rpx > 24.0f) {                  // clearly visible: just a name beside its limb
+                char buf[160];
+                std::snprintf(buf, sizeof buf, "%s  %s", b.name.c_str(), units::formatDistance(std::max(dist - b.radius, 0.0) * mPerM).c_str());
+                dl->AddText(ImVec2(at.x + rpx * 0.75f + 6.0f, at.y - rpx * 0.75f), IM_COL32(150, 220, 255, 200), buf);
+                continue;
+            }
             label(at, rpx, b.name, std::max(dist - b.radius, 0.0), IM_COL32(150, 220, 255, 220));
         }
     }
@@ -244,6 +252,70 @@ void Ui::draw(UiContext& c) {
             ImGui::TextDisabled("The film's '1 hour = 7 years' needs a fast-spinning black hole; around a non-spinning one");
             ImGui::TextDisabled("a stable orbit slows time by at most 1.41x.");
         }
+    }
+
+    // ---- star disruption ----
+    if (c.tde && ImGui::CollapsingHeader("Star disruption", ImGuiTreeNodeFlags_DefaultOpen)) {
+        TdeControls& t = *c.tde;
+        if (!t.moduleAvailable)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "The simulation module is not in this build yet.");
+        const char* scen[kTdeScenarioCount];
+        for (int i = 0; i < kTdeScenarioCount; ++i) scen[i] = kTdeScenarios[i].name;
+        if (ImGui::Combo("Scenario", &t.scenario, scen, kTdeScenarioCount)) {
+            const TdeScenario& sc = kTdeScenarios[t.scenario];
+            s.bhMassSolar = sc.bhMassSolar;
+            t.starPreset = sc.starPreset;
+            const StarPreset& sp = kStarPresets[sc.starPreset];
+            t.massSolar = sp.massSolar; t.radiusSolar = sp.radiusSolar; t.teff = sp.teff; t.polytropeN = sp.polytropeN;
+            t.beta = sc.beta;
+            t.inclinationDeg = sc.inclinationDeg;
+        }
+        const char* stars[kStarPresetCount];
+        for (int i = 0; i < kStarPresetCount; ++i) stars[i] = kStarPresets[i].name;
+        if (ImGui::Combo("Star", &t.starPreset, stars, kStarPresetCount)) {
+            const StarPreset& sp = kStarPresets[t.starPreset];
+            t.massSolar = sp.massSolar; t.radiusSolar = sp.radiusSolar; t.teff = sp.teff; t.polytropeN = sp.polytropeN;
+        }
+        sliderLogD("Star mass (suns)", &t.massSolar, 0.08, 150.0, "%.3g");
+        sliderLogD("Star radius (suns)", &t.radiusSolar, 0.005, 2000.0, "%.3g");
+        sliderLogD("Surface temperature (K)", &t.teff, 2000.0, 50000.0, "%.0f");
+        sliderLogD("Penetration (beta)", &t.beta, 0.5, 10.0, "%.2f");
+        const double incMin = -80.0, incMax = 80.0;
+        ImGui::SliderScalar("Orbit tilt (deg)", ImGuiDataType_Double, &t.inclinationDeg, &incMin, &incMax, "%.0f");
+        ImGui::Checkbox("Retrograde", &t.retrograde);
+        // What will happen, from the tidal radius r_t = R_star (M_bh / M_star)^(1/3).
+        const double mPerM = units::metersPerM(s.bhMassSolar);
+        const double rStar = t.radiusSolar * units::kSolarRadius / mPerM;
+        const double rt = rStar * std::cbrt(s.bhMassSolar / t.massSolar);
+        const double rp = rt / t.beta;
+        ImGui::TextDisabled("tidal radius %.4g M (%s), closest approach %.4g M", rt, units::formatDistance(rt * mPerM).c_str(), rp);
+        if (rp < 4.0) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Too compact for these tides: it will be swallowed whole.");
+        else if (t.beta < 0.6) ImGui::TextDisabled("A grazing pass: the star loses some gas but survives.");
+        else ImGui::TextDisabled("The tides will tear it apart.");
+        ImGui::BeginDisabled(!t.moduleAvailable);
+        if (ImGui::Button("Spawn star")) t.spawnRequested = true;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) t.clearRequested = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Watch")) t.watchRequested = true;
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto time warp", &t.autoWarp);
+        if (c.tdeActive && c.tdeStats) {
+            const tde::TdeStats& st = *c.tdeStats;
+            const double sPerM = units::secondsPerM(s.bhMassSolar);
+            const char* phase = st.swallowedWhole ? "falling in whole"
+                              : !st.released ? "approaching"
+                              : st.accretedFraction > 0.02 ? "feeding the black hole"
+                              : st.boundFraction > 0.0 ? "torn into a stream" : "being torn apart";
+            ImGui::Text("%s, %s after spawn", phase, units::formatDuration(st.timeM * sPerM).c_str());
+            ImGui::Text("bound %.0f%%   eaten %.1f%%   escaping %.0f%%   particles %d", 100.0 * st.boundFraction,
+                        100.0 * st.accretedFraction, 100.0 * st.escapedFraction, st.activeParticles);
+            ImGui::ProgressBar(static_cast<float>(std::min(1.0, st.dissipationRel)), ImVec2(-1.0f, 0.0f), "flare");
+            if (st.limited) ImGui::TextDisabled("simulation running slower than the time warp asks (cost cap)");
+        }
+        sliderLog("Gas brightness", &s.gasBrightness, 0.05f, 20.0f);
+        sliderLog("Gas opacity", &s.gasOpacity, 0.05f, 20.0f);
     }
 
     // ---- travel ----

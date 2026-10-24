@@ -44,7 +44,7 @@ bool Renderer::init() {
 }
 
 void Renderer::shutdown() {
-    for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) p->destroy();
+    for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &traceGasProg_, &traceGasBodiesProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) p->destroy();
     destroyTarget(trace_);
     destroyTarget(accum_[0]);
     destroyTarget(accum_[1]);
@@ -61,7 +61,8 @@ void Renderer::shutdown() {
 }
 
 bool Renderer::shadersOk() const {
-    return traceProg_.valid() && traceBodiesProg_.valid() && accumProg_.valid() && upscaleProg_.valid() && bloomDownProg_.valid() &&
+    return traceProg_.valid() && traceBodiesProg_.valid() && traceGasProg_.valid() && traceGasBodiesProg_.valid() &&
+           accumProg_.valid() && upscaleProg_.valid() && bloomDownProg_.valid() &&
            bloomUpProg_.valid() && compositeProg_.valid();
 }
 
@@ -69,10 +70,13 @@ bool Renderer::reloadShaders() {
     bool ok = true;
     shaderLog_.clear();
     struct Entry { ShaderProgram* p; const char* frag; };
-    traceProg_.setDefines({"BHS_BODIES 0"});
-    traceBodiesProg_.setDefines({"BHS_BODIES 1"});
+    traceProg_.setDefines({"BHS_BODIES 0", "BHS_GAS 0"});
+    traceBodiesProg_.setDefines({"BHS_BODIES 1", "BHS_GAS 0"});
+    traceGasProg_.setDefines({"BHS_BODIES 0", "BHS_GAS 1"});
+    traceGasBodiesProg_.setDefines({"BHS_BODIES 1", "BHS_GAS 1"});
     const Entry entries[] = {
         {&traceProg_, "blackhole.frag"},   {&traceBodiesProg_, "blackhole.frag"},
+        {&traceGasProg_, "blackhole.frag"}, {&traceGasBodiesProg_, "blackhole.frag"},
         {&accumProg_, "accumulate.frag"}, {&upscaleProg_, "upscale.frag"},
         {&bloomDownProg_, "bloom_down.frag"}, {&bloomUpProg_, "bloom_up.frag"}, {&compositeProg_, "composite.frag"},
     };
@@ -89,7 +93,8 @@ bool Renderer::reloadShaders() {
 
 bool Renderer::checkShaderReload() {
     bool any = false;
-    for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_}) {
+    for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &traceGasProg_, &traceGasBodiesProg_, &accumProg_, &upscaleProg_,
+                             &bloomDownProg_, &bloomUpProg_, &compositeProg_}) {
         if (p->reloadIfChanged()) {
             any = true;
             shaderLog_ = p->log();
@@ -202,6 +207,24 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, bodyBuffer_);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     p.set("uBodyCount", static_cast<int>(nb));
+    // Star-disruption gas volumes on texture units 4..7.
+    const int ng = (in.gas && in.gasCount > 0) ? std::min(in.gasCount, 4) : 0;
+    p.set("uGasCount", ng);
+    p.set("uGasBrightness", s.gasBrightness);
+    p.set("uGasOpacity", s.gasOpacity);
+    for (int i = 0; i < 4; ++i) {
+        const std::string idx = "[" + std::to_string(i) + "]";
+        p.set("uGasTex" + idx, 4 + i);
+        glActiveTexture(GL_TEXTURE4 + i);
+        if (i < ng) {
+            glBindTexture(GL_TEXTURE_3D, in.gas[i].texture);
+            p.set("uGasBox" + idx, glm::vec4(in.gas[i].center, in.gas[i].halfSize));
+            p.set("uGasRes" + idx, static_cast<float>(in.gas[i].resolution));
+        } else {
+            glBindTexture(GL_TEXTURE_3D, in.noise3d);   // any valid 3D texture keeps samplers complete
+        }
+    }
+    glActiveTexture(GL_TEXTURE0);
     p.set("uMaxSteps", s.maxSteps);
     p.set("uStepScale", s.stepScale);
     p.set("uDiskStep", s.diskStep);
@@ -237,7 +260,10 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
 }
 
 ShaderProgram& Renderer::traceFor(const FrameInput& in) {
-    return (in.bodies && !in.bodies->empty()) ? traceBodiesProg_ : traceProg_;
+    const bool bodies = in.bodies && !in.bodies->empty();
+    const bool gas = in.gas && in.gasCount > 0;
+    if (gas) return bodies ? traceGasBodiesProg_ : traceGasProg_;
+    return bodies ? traceBodiesProg_ : traceProg_;
 }
 
 void Renderer::tracePass(const FrameInput& in, Target& dst, const glm::vec2& jitter, bool banded) {

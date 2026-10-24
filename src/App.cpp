@@ -267,6 +267,8 @@ int App::run(const Options& opt) {
     sky_.init();
     sky_.bake(settings_);
     if (!renderer_.init()) logError("shader compilation failed; fix the shaders and press F5");
+    tdeCtl_.moduleAvailable = tde_.init(262144);
+    if (!tdeCtl_.moduleAvailable) logInfo("star-disruption simulation not available in this build");
 
     const auto& bms = Camera::defaultBookmarks();
     if (opt.bookmark >= 1 && opt.bookmark <= static_cast<int>(bms.size()))
@@ -301,6 +303,7 @@ int App::run(const Options& opt) {
 
 void App::shutdown() {
     ui_.shutdown();
+    tde_.shutdown();
     renderer_.shutdown();
     sky_.shutdown();
     diskTex_.shutdown();
@@ -434,6 +437,13 @@ void App::frame() {
     fi.settings = &settings_;
     fi.bodies = &bodiesGpu_;
     fi.farMode = camera_.radius() > 1e7;
+    gasRefs_.clear();
+    for (int i = 0; i < tde_.volumeCount() && i < 4; ++i) {
+        const tde::GasVolume& gv = tde_.volume(i);
+        if (gv.texture) gasRefs_.push_back({gv.texture, gv.center, gv.halfSize, gv.resolution});
+    }
+    fi.gas = gasRefs_.data();
+    fi.gasCount = static_cast<int>(gasRefs_.size());
     fi.time = static_cast<float>(simTime_);
     fi.dt = dt;
     fi.windowW = fbW_;
@@ -491,6 +501,9 @@ void App::frame() {
         ctx.goToRequest = &goToRequest_;
         ctx.nearestName = nearestName_.c_str();
         ctx.nearestDist = nearestDist_;
+        ctx.tde = &tdeCtl_;
+        ctx.tdeStats = &tde_.stats();
+        ctx.tdeActive = tde_.active();
         ui_.draw(ctx);
         ui_.render();
     } else {
@@ -607,7 +620,67 @@ void App::buildBodies() {
             bodies_.push_back(b);
         }
     }
+    if (tde_.starIntact()) {
+        BodyDesc b;
+        b.name = "Star";
+        b.kind = BodyKind::Star;
+        b.pos = tde_.starPosition();
+        b.vel = tde_.starVelocity();
+        b.radius = tde_.starRadiusM();
+        b.teff = static_cast<float>(tde_.starTeff());
+        b.lightIntensity = 6.0f;
+        b.seed = 5;
+        b.info = "The star on its way in";
+        bodies_.push_back(b);
+    }
     bodiesGpu_ = packBodies(bodies_, camera_.position(), 0.25 * 0.0006, 16);
+}
+
+void App::updateTde(double dtM) {
+    if (tdeCtl_.clearRequested) {
+        tdeCtl_.clearRequested = false;
+        tde_.clear();
+    }
+    if (tdeCtl_.spawnRequested) {
+        tdeCtl_.spawnRequested = false;
+        tde::StarParams sp;
+        sp.massSolar = tdeCtl_.massSolar;
+        sp.radiusSolar = tdeCtl_.radiusSolar;
+        sp.teff = tdeCtl_.teff;
+        sp.polytropeN = tdeCtl_.polytropeN;
+        tde::OrbitParams op;
+        op.beta = tdeCtl_.beta;
+        op.inclinationDeg = tdeCtl_.inclinationDeg;
+        op.longitudeDeg = tdeCtl_.longitudeDeg;
+        op.retrograde = tdeCtl_.retrograde;
+        op.startDistanceRt = 3.0;
+        tde_.spawn(sp, op, settings_.bhMassSolar, tdeCtl_.particles);
+        tdeCtl_.watchRequested = true;
+        logInfo("spawned a {} M_sun, {} R_sun star (beta {})", sp.massSolar, sp.radiusSolar, op.beta);
+    }
+    if (tdeCtl_.watchRequested) {
+        tdeCtl_.watchRequested = false;
+        const tde::TdeStats& st = tde_.stats();
+        const double rp = std::max(st.pericenterM, 4.0);
+        const double D = std::max(30.0, 2.8 * rp);
+        const double L = glm::radians(tdeCtl_.longitudeDeg), inc = glm::radians(tdeCtl_.inclinationDeg);
+        const glm::dvec3 peri(std::cos(L), 0.0, -std::sin(L));
+        const glm::dvec3 normal = glm::normalize(glm::dvec3(0.0, std::cos(inc), 0.0) + glm::cross(peri, glm::dvec3(0, 1, 0)) * std::sin(inc));
+        const glm::dvec3 from = glm::normalize(normal * std::sin(glm::radians(35.0)) - peri * std::cos(glm::radians(35.0)));
+        followName_.clear();
+        camera_.flyToTarget(glm::dvec3(0.0), D, from);
+    }
+    if (!tde_.active()) return;
+    if (tdeCtl_.autoWarp) {
+        // Keep the event moving at a watchable pace: about 1/15 of the local dynamical time per
+        // second while the star falls in, growing with the age of the debris afterwards.
+        const tde::TdeStats& st = tde_.stats();
+        const double r = tde_.starIntact() ? glm::length(tde_.starPosition()) : std::max(st.pericenterM, 6.0);
+        const double tdyn = std::pow(std::max(r, 3.0), 1.5);
+        const double perSecondM = std::max(tdyn / 15.0, (st.released ? 0.12 * st.timeM : 0.0));
+        settings_.timeWarp = std::clamp(perSecondM * units::secondsPerM(settings_.bhMassSolar), 1e-3, 1e11);
+    }
+    tde_.step(dtM);
 }
 
 void App::updateWorld(float dt, const Camera::Input& in) {
@@ -616,6 +689,7 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     simSeconds_ += dtSim;
     const double dtM = dtSim / units::secondsPerM(settings_.bhMassSolar);
     bhSystem_.update(dtM);
+    updateTde(dtM);
     buildBodies();
 
     // Ride along with the planet we are next to (they orbit at a large fraction of c).

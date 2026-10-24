@@ -89,7 +89,14 @@ target_link_libraries(bhs_core PUBLIC glm::glm)
 target_compile_definitions(bhs_core PUBLIC GLM_ENABLE_EXPERIMENTAL GLM_FORCE_SILENT_WARNINGS)
 
 # ---------------------------------------------------------------- application
+# Star-disruption simulation: the real module when present, otherwise a placeholder.
+file(GLOB BHS_TDE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/tde/*.cpp)
+if(NOT BHS_TDE_SOURCES)
+  set(BHS_TDE_SOURCES ${CMAKE_SOURCE_DIR}/src/stubs/TdeSimStub.cpp)
+endif()
+
 add_executable(blackhole
+  ${BHS_TDE_SOURCES}
   src/main.cpp
   src/App.cpp
   src/Shader.cpp
