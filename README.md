@@ -37,6 +37,22 @@ nvidia-smi                                               # must now list the RTX
 Alternatively disable Secure Boot in the BIOS. Without this the app still runs on the
 Radeon iGPU (use the Low preset); `run.sh` detects the driver automatically.
 
+## Performance
+
+Measured with `--benchmark` at a 1854x1011 window on the **Radeon iGPU** (the RTX 3060 is
+roughly five to six times faster, so expect High at well over 60 fps once its driver loads):
+
+| Preset | Internal res | Steps | Disk | iGPU fps |
+|---|---|---|---|---|
+| Low | 50 % | 200 | thin | 98 |
+| Medium | 75 % | 300 | volumetric | 37 |
+| High (default) | 100 % | 450 | volumetric | 17 |
+| Ultra | 100 % | 700 | volumetric, fine | 11 |
+
+The renderer also supersamples progressively whenever the camera is still, so a paused view
+keeps sharpening for a few seconds on any preset. *Dynamic resolution* in the Quality panel
+holds a target frame time by scaling the internal resolution.
+
 ## Controls
 
 | Input | Action |
