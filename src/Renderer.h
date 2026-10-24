@@ -30,6 +30,7 @@ struct FrameInput {
     GLuint skyCubemap = 0, noise3d = 0, blackbodyLut = 0;
     bool resetAccumulation = false;
     bool diskAnimating = true;
+    float diskFade = 1.0f;        // 0..1: the steady accretion disk fades out during a star disruption
     GLuint targetFbo = 0;   // final framebuffer (0 = window)
     float extraGpuMs = 0.0f; // GPU work outside the renderer (bridge readback), for frame-time targets
     const std::vector<struct BodyGpu>* bodies = nullptr;
@@ -90,6 +91,15 @@ private:
 
     // Tracer variants: with/without body code and with/without gas code.
     ShaderProgram traceProg_, traceBodiesProg_, traceGasProg_, traceGasBodiesProg_;
+    // Star-disruption gas: each volume is smoothed (separable 3D blur) into gasSmooth_[i][0].
+    ShaderProgram gasBlurProg_;
+    GLuint gasSmooth_[4][2] = {};
+    int gasSmoothRes_[4] = {};
+    int gasLive_[4] = {1, 1, 1, 1};   // volumes worth marching (peak optical depth per texel, read a frame late)
+    ShaderProgram gasPeakProg_;
+    GLuint gasPeakBuf_[2] = {0, 0};
+    int gasPeakFrame_ = 0;
+    void smoothGas(const FrameInput& in);
     ShaderProgram accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
     ShaderProgram& traceFor(const FrameInput& in);
     Target trace_, accum_[2], upscaled_, lumaProbe_, captureOut_;

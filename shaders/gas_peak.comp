@@ -1,0 +1,17 @@
+#version 460 core
+// Largest optical depth across one texel of a star-disruption gas volume (r channel x texel size),
+// accumulated into peaks[uSlot] as fixed point (1e-4 units) with an atomic max. The renderer reads it
+// a frame later and skips volumes whose gas is too thin to see.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+uniform sampler3D uSrc;
+uniform int uRes;
+uniform int uSlot;
+uniform float uTexel;     // texel size, M
+layout(std430, binding = 6) buffer Peaks { uint peaks[]; };
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(p, ivec3(uRes)))) return;
+    float tau = max(texelFetch(uSrc, p, 0).r, 0.0) * uTexel;
+    if (tau > 1e-4) atomicMax(peaks[uSlot], uint(min(tau, 4.0e5) * 1e4));
+}

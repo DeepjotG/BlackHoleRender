@@ -1,0 +1,102 @@
+#version 460 core
+// Star disruption: adds the gas of grid 0 into the black-hole nest, cell by cell (nearest grid point
+// of each grid-0 cell centre in the finest nest level that holds it with the deposit margin). Used
+// while grid 0 is at least twice finer than every nest level (uInfo.z = 1); particles inside grid 0
+// then skip their own nest deposit. The sums are exact integers. The part of the gas that grid 0
+// renders itself (its ownership ramp at the cell centre) is also added to the nest's "owned" words, so
+// the nest renders only the remainder however small grid 0 is compared with a nest cell.
+// One workgroup per grid-0 block; a block covers at most a few nest cells, so the workgroup reduces
+// in a shared hash table first.
+#include "tde_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+const int HSLOTS = 128;
+const int SW = 16;                 // words per slot: mass, 5 pairs, owned mass, 2 owned pairs
+const uint EMPTY = 0xFFFFFFFFu;
+shared uint hKey[HSLOTS];
+shared uint hW[HSLOTS * SW];
+
+void sharedAddPair(int i, uvec2 p) {
+    if (p.x == 0u && p.y == 0u) return;
+    uint old = atomicAdd(hW[i], p.x);
+    uint hiAdd = p.y + ((old + p.x < old) ? 1u : 0u);
+    if (hiAdd != 0u) atomicAdd(hW[i + 1], hiAdd);
+}
+
+uvec2 scalePair(uvec2 p, float w) { return toPair(decode64(p.x, p.y) * w); }
+
+void main() {
+    ivec3 bc = ivec3(gl_WorkGroupID);
+    if ((gBlk[(bc.z * NBLK + bc.y) * NBLK + bc.x] & 1u) == 0u) return;   // grid 0 block not written
+    uint lid = gl_LocalInvocationIndex;
+    for (int s = int(lid); s < HSLOTS; s += 512) {
+        hKey[s] = EMPTY;
+        for (int k = 0; k < SW; ++k) hW[s * SW + k] = 0u;
+    }
+    barrier();
+
+    ivec3 c = ivec3(gl_GlobalInvocationID);
+    int cell = cellIndex(c);
+    uint m = gAcc[accIndex(0, W_MASS, cell)];
+    uvec2 p[5];
+    bool hasGas = m != 0u;
+    for (int w = 0; w < 5; ++w) {
+        int idx = accIndex(0, W_MOM + 2 * w, cell);
+        p[w] = uvec2(gAcc[idx], gAcc[idx + CELLS]);
+        hasGas = hasGas || p[w] != uvec2(0u);
+    }
+    if (hasGas) {
+        vec4 g0 = uGridDep[0];
+        vec3 pos = g0.xyz + (vec3(c) + 0.5 - 0.5 * float(RES)) * gridCell(g0);
+        float own = insideRampGeo(g0, uRamp.x, pos);
+        uint mOwn = uint(float(m) * own + 0.5);
+        uvec2 eOwn = scalePair(p[3], own), hOwn = scalePair(p[4], own);
+        for (int k = 1; k < NGRID; ++k) {
+            vec4 geo = uGridDep[k];
+            if (geo.w <= 0.0) continue;
+            vec3 s = gridCoord(geo, pos);
+            if (!insideMargin(s, 0.5)) continue;
+            int target = cellIndex(ivec3(floor(s)));
+            uint key = (uint(k) << 18) | uint(target);
+            uint h = (key * 2654435761u) >> 25;
+            bool done = false;
+            for (int probe = 0; probe < 16 && !done; ++probe) {
+                uint sl = (h + uint(probe)) & uint(HSLOTS - 1);
+                uint prev = atomicCompSwap(hKey[sl], EMPTY, key);
+                if (prev == EMPTY || prev == key) {
+                    int b = int(sl) * SW;
+                    if (m != 0u) atomicAdd(hW[b], m);
+                    for (int w = 0; w < 5; ++w) sharedAddPair(b + 1 + 2 * w, p[w]);
+                    if (mOwn != 0u) atomicAdd(hW[b + 11], mOwn);
+                    sharedAddPair(b + 12, eOwn);
+                    sharedAddPair(b + 14, hOwn);
+                    done = true;
+                }
+            }
+            if (!done) {
+                if (m != 0u) atomicAdd(gAcc[accIndex(k, W_MASS, target)], m);
+                for (int w = 0; w < 5; ++w) accAddPair(accIndex(k, W_MOM + 2 * w, target), p[w].x, p[w].y);
+                if (mOwn != 0u) atomicAdd(gAcc[accIndex(k, W_OWN_MASS, target)], mOwn);
+                accAddPair(accIndex(k, W_OWN_ENER, target), eOwn.x, eOwn.y);
+                accAddPair(accIndex(k, W_OWN_HEAT, target), hOwn.x, hOwn.y);
+                markTouched(k, target);
+            }
+            break;
+        }
+    }
+    barrier();
+    for (int s = int(lid); s < HSLOTS; s += 512) {
+        uint key = hKey[s];
+        if (key == EMPTY) continue;
+        int g = int(key >> 18);
+        int target = int(key & 0x3FFFFu);
+        int b = s * SW;
+        if (hW[b] != 0u) atomicAdd(gAcc[accIndex(g, W_MASS, target)], hW[b]);
+        for (int w = 0; w < 5; ++w) accAddPair(accIndex(g, W_MOM + 2 * w, target), hW[b + 1 + 2 * w], hW[b + 2 + 2 * w]);
+        if (hW[b + 11] != 0u) atomicAdd(gAcc[accIndex(g, W_OWN_MASS, target)], hW[b + 11]);
+        accAddPair(accIndex(g, W_OWN_ENER, target), hW[b + 12], hW[b + 13]);
+        accAddPair(accIndex(g, W_OWN_HEAT, target), hW[b + 14], hW[b + 15]);
+        markTouched(g, target);
+    }
+}

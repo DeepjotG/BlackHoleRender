@@ -160,6 +160,18 @@ The gas is rendered with the same lensing as everything else.
 * **Penetration (beta)** sets how deep the orbit dives (pericentre = tidal radius / beta).
 * **Auto time warp** keeps the event watchable: the fall-in takes days to centuries of simulated
   time depending on the scenario, and the debris keeps returning for much longer.
+* **The camera** rides along with the star as it falls in (the black hole looming ahead), stays
+  with the debris through pericentre, then pulls back to show the stream and the forming disk
+  around the hole. Fly or look around at any time to take over.
+* **The steady accretion disk fades out** during an event (a real disruption happens around a quiet
+  black hole and builds its own disk from the debris); tick *Keep the steady disk* to keep it.
+* **Gas brightness and opacity** (Quality panel) scale the debris' glow and absorption.
+
+How it is simulated: until it reaches about twice the tidal radius the star moves rigidly on an
+exact Schwarzschild orbit; then it becomes 131,072 particles (a polytrope in hydrostatic balance)
+whose pressure, shock heating, cooling and self-gravity are computed on nested 64^3 grids around
+the star and the hole, with general-relativistic orbits for every particle and accretion at the
+horizon. The grids are ray-marched into the same lensed image as everything else.
 
 ## Controls
 
@@ -195,6 +207,8 @@ The gas is rendered with the same lensing as everything else.
 --universe backdrop|invented|real  which sky to start with
 --universe-seed N  --placement sgra|sun   invented universe seed; where the real black hole is
 --fov DEG                        vertical field of view
+--tde N                          start star-disruption scenario N (1-5, as listed in the panel)
+--dt S                           fixed frame time in seconds (reproducible captures)
 --goto NAME | --fly NAME         start next to / fly to Miller, Mann, Edmunds, "black hole",
                                  "nearest star", or any star, galaxy or place in the Travel list
 --igpu                           render on the integrated GPU

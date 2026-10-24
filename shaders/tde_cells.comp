@@ -1,0 +1,88 @@
+#version 460 core
+// Star disruption: decodes the accumulators of grid uGrid (deposit geometry) into the field buffers
+//   gFA = (grad P', rho'),  gFB = (rho' v, rho' u),  gFC = rho' div(v)
+// with P' = (gamma - 1) rho' u, densities in star-mass fractions per M^3 and the pressure gradient and
+// the divergence by central differences (clamped at the grid edge; forces never use the outer cells;
+// an empty neighbour counts with the cell's own velocity, so gas edges are not compressions). One workgroup per
+// block; blocks outside the dilated set are skipped (their fields are never read). On the last step of
+// a frame it also counts occupied cells and, for grid 0, the mass inside the box and in its outer
+// eighth on each side.
+#include "tde_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+uniform int uGrid;
+
+shared uint shOcc;
+shared uint shMass;
+shared uint shOuter;
+
+float energyAt(int g, ivec3 c) {
+    c = clamp(c, ivec3(0), ivec3(RES - 1));
+    return accRead64(accIndex(g, W_ENER, cellIndex(c)));
+}
+
+// Mean velocity of a cell (momentum / mass, both in particle units), or `fallback` if it is empty.
+vec3 velocityAt(int g, ivec3 c, vec3 fallback) {
+    c = clamp(c, ivec3(0), ivec3(RES - 1));
+    int cell = cellIndex(c);
+    float n = float(gAcc[accIndex(g, W_MASS, cell)]) / uScale.x;
+    if (n <= 1e-3) return fallback;
+    return vec3(accRead64(accIndex(g, W_MOM, cell)), accRead64(accIndex(g, W_MOM + 2, cell)),
+                accRead64(accIndex(g, W_MOM + 4, cell))) / (MOM_SCALE * n);
+}
+
+void main() {
+    int g = uGrid;
+    ivec3 bc = ivec3(gl_WorkGroupID);
+    if ((gBlk[g * BLOCKS + (bc.z * NBLK + bc.y) * NBLK + bc.x] & 2u) == 0u) return;
+    if (gl_LocalInvocationIndex == 0u) {
+        shOcc = 0u;
+        shMass = 0u;
+        shOuter = 0u;
+    }
+    barrier();
+    ivec3 c = ivec3(gl_GlobalInvocationID);
+    float cs = gridCell(uGridDep[g]);
+    float invNV = 1.0 / (uScale.w * cs * cs * cs);    // star-mass fraction per particle and volume
+    int cell = cellIndex(c);
+    float nPart = float(gAcc[accIndex(g, W_MASS, cell)]) / uScale.x;
+    float rho = nPart * invNV;
+    vec3 rhoV = vec3(0.0);
+    if (nPart > 0.0)
+        rhoV = vec3(accRead64(accIndex(g, W_MOM, cell)), accRead64(accIndex(g, W_MOM + 2, cell)),
+                    accRead64(accIndex(g, W_MOM + 4, cell))) * (invNV / MOM_SCALE);
+    float eScale = invNV / uScale.y;
+    float rhoU = energyAt(g, c) * eScale;
+    float pk = (GAMMA - 1.0) * eScale / (2.0 * cs);
+    vec3 gradP = vec3(energyAt(g, c + ivec3(1, 0, 0)) - energyAt(g, c - ivec3(1, 0, 0)),
+                      energyAt(g, c + ivec3(0, 1, 0)) - energyAt(g, c - ivec3(0, 1, 0)),
+                      energyAt(g, c + ivec3(0, 0, 1)) - energyAt(g, c - ivec3(0, 0, 1))) * pk;
+    float rhoDiv = 0.0;
+    if (nPart > 1e-3) {
+        vec3 v0 = rhoV / rho;
+        float dv = (velocityAt(g, c + ivec3(1, 0, 0), v0).x - velocityAt(g, c - ivec3(1, 0, 0), v0).x) +
+                   (velocityAt(g, c + ivec3(0, 1, 0), v0).y - velocityAt(g, c - ivec3(0, 1, 0), v0).y) +
+                   (velocityAt(g, c + ivec3(0, 0, 1), v0).z - velocityAt(g, c - ivec3(0, 0, 1), v0).z);
+        rhoDiv = rho * dv / (2.0 * cs);
+    }
+    gFA[g * CELLS + cell] = vec4(gradP, rho);
+    gFB[g * CELLS + cell] = vec4(rhoV, rhoU);
+    gFC[g * CELLS + cell] = rhoDiv;
+
+    if (uStep.w > 0.5) {
+        if (nPart > 0.01) atomicAdd(shOcc, 1u);
+        if (g == 0 && nPart > 0.0) {
+            uint m = uint(min(nPart * 256.0, 4.0e9));
+            atomicAdd(shMass, m);
+            int edge = RES / 8;
+            if (any(lessThan(c, ivec3(edge))) || any(greaterThanEqual(c, ivec3(RES - edge)))) atomicAdd(shOuter, m);
+        }
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && uStep.w > 0.5) {
+        if (shOcc != 0u) atomicAdd(sWords[S_OCC + g], shOcc);
+        if (shMass != 0u) atomicAdd(sWords[S_G0_MASS], shMass);
+        if (shOuter != 0u) atomicAdd(sWords[S_G0_OUTER], shOuter);
+    }
+}

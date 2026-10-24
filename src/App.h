@@ -125,13 +125,19 @@ private:
     GpuBridge bridge_;
     bool mouseCaptured_ = false;
     bool firstMouse_ = true;
+    bool automated_ = false;             // --frames / --benchmark: ignore keyboard and mouse
     glm::dvec2 lastCursor_{0.0};
     bool vsyncApplied_ = true;
 
     double lastTime_ = 0.0;
     double simTime_ = 0.0;
     double diskClock_ = 0.0;
-    double fixedDt_ = 0.0;               // --dt: fixed frame time for reproducible captures             // disk flow clock in M, wrapped to the cross-fade period
+    double fixedDt_ = 0.0;               // --dt: fixed frame time for reproducible captures
+    float diskFade_ = 1.0f;              // the steady disk fades out while a star disruption plays
+    int watchPhase_ = 0;                 // star disruption camera: 0 off, 1 riding with the star, 2 pulled back
+    glm::dvec3 watchPrev_{0.0};
+    glm::dvec3 watchOffset_{0.0};        // camera position relative to the star while riding along
+    double watchPeriM_ = 0.0;             // disk flow clock in M, wrapped to the cross-fade period
     double reloadTimer_ = 0.0;
     double skyDirtyFor_ = 0.0;
     int lastDebugView_ = 0;

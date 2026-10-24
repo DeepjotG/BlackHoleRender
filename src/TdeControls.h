@@ -49,6 +49,7 @@ struct TdeControls {
     bool clearRequested = false;
     bool watchRequested = false;   // move the camera to a viewpoint that frames the event
     bool autoWarp = true;          // keep the time warp matched to the event's current pace
+    bool keepDisk = false;         // keep the steady accretion disk during an event (normally it fades out)
     bool moduleAvailable = false;  // false while the simulation module is not built
 
     void applyStarPreset(int i) {

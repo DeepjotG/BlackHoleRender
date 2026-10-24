@@ -142,7 +142,13 @@ void main() {
             }
             if (dot(x, v) > 0.0 && r > rEscMin) {
                 float b = h / vlen;
-                if (!lensing || 0.75 * b * b * b / (r * r * r * r) < ESC_TOL) {
+                bool gasAhead = false;
+#if BHS_GAS
+                // Debris far from the hole (a giant's stream at hundreds of M) lies beyond the usual
+                // escape radius: keep marching while the ray is inside or still heading for a volume.
+                gasAhead = gasCellSize(x) > 0.0 || gasEntryDistance(x, v / vlen) < 1e29;
+#endif
+                if (!gasAhead && (!lensing || 0.75 * b * b * b / (r * r * r * r) < ESC_TOL)) {
                     escDir = lensing ? farFieldDirection(x, v, h2) : normalize(v);
                     status = 1;
                     break;
@@ -176,10 +182,8 @@ void main() {
             // nearest volume instead of stepping over it.
             float gasCell = gasCellSize(x);
             if (gasCell > 0.0) ds = min(ds, max(1.5 * gasCell, 1e-6 * r));
-            else {
-                float te = gasEntryDistance(x, v / vlen);
-                if (te < ds) ds = max(te + 1e-4 * max(r, 1.0), 1e-6 * r);
-            }
+            float te = gasEntryDistance(x, v / vlen);   // a volume ahead (possibly finer than this one)
+            if (te < ds) ds = max(te + 1e-4 * max(r, 1.0), 1e-6 * r);
 #endif
             float dt = ds / vlen;
             vec3 x0 = x, v0 = v;
@@ -220,7 +224,10 @@ void main() {
                 if (cellHere > 0.0 && seg > 0.0) {
                     int n = clamp(int(ceil(seg / cellHere)), 1, 8);
                     float sub = seg / float(n);
-                    for (int k = 0; k < n; ++k) gasSample(mix(x0, x, (float(k) + 0.5) / float(n)), sub, color, transmittance);
+                    // Per-pixel, per-frame offset of the samples: banding against the volume's texel
+                    // grid becomes fine noise that frame accumulation averages away.
+                    float gj = hash12(gl_FragCoord.xy + fract(uJitter * 7.31) * 1024.0);
+                    for (int k = 0; k < n; ++k) gasSample(mix(x0, x, (float(k) + gj) / float(n)), sub, color, transmittance);
                 }
             }
 #endif

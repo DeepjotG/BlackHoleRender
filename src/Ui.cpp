@@ -394,6 +394,8 @@ void Ui::draw(UiContext& c) {
         if (ImGui::Button("Watch")) t.watchRequested = true;
         ImGui::SameLine();
         ImGui::Checkbox("Auto time warp", &t.autoWarp);
+        ImGui::SameLine();
+        ImGui::Checkbox("Keep the steady disk", &t.keepDisk);
         if (c.tdeActive && c.tdeStats) {
             const tde::TdeStats& st = *c.tdeStats;
             const double sPerM = units::secondsPerM(s.bhMassSolar);
@@ -407,7 +409,7 @@ void Ui::draw(UiContext& c) {
             ImGui::ProgressBar(static_cast<float>(std::min(1.0, st.dissipationRel)), ImVec2(-1.0f, 0.0f), "flare");
             if (st.limited) ImGui::TextDisabled("simulation running slower than the time warp asks (cost cap)");
         }
-        sliderLog("Gas brightness", &s.gasBrightness, 0.05f, 20.0f);
+        sliderLog("Gas brightness", &s.gasBrightness, 0.5f, 200.0f);
         sliderLog("Gas opacity", &s.gasOpacity, 0.05f, 20.0f);
     }
 

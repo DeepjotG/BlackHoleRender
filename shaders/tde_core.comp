@@ -1,0 +1,197 @@
+#version 460 core
+// Star disruption: the core that carries the monopole self-gravity. One workgroup.
+//  uMode 0 (after the cells pass): cumulative monopole table from the radial histogram; core position
+//          and velocity = centre of mass of the particles within d_c of the predicted position (summed
+//          by the deposit; a mean shift that converges on the core's centre of mass); peak density of
+//          grid 0 near the core (whole grid if that window is empty), which tells whether a dense core
+//          survives. Without particles near the prediction, the 7^3 cells around the peak are used.
+//  uMode 1 (before the update pass): integrates the core along its geodesic over the coming hydro
+//          step (black hole gravity, same scheme as the particles) and stores TRAJ + 1 samples.
+#include "tde_common.glsl"
+
+layout(local_size_x = 256) in;
+
+uniform int uMode;
+
+shared float shBest[256];
+shared int shIdx[256];
+shared vec4 shSumX[256];
+shared vec4 shSumV[256];
+
+void reduceBest(int lid) {
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            float b = shBest[lid + stride];
+            int ib = shIdx[lid + stride];
+            if (b > shBest[lid] || (b == shBest[lid] && ib >= 0 && (shIdx[lid] < 0 || ib < shIdx[lid]))) {
+                shBest[lid] = b;
+                shIdx[lid] = ib;
+            }
+        }
+        barrier();
+    }
+}
+
+void integrateTrajectory() {
+    vec3 x = cPos.xyz;
+    vec3 v = cVel.xyz;
+    bool bh = uPhys.x > 0.5;
+    float dtS = uStep.x / float(TRAJ);
+    cTraj[0] = vec4(x, 0.0);
+    for (int k = 0; k < TRAJ; ++k) {
+        if (cPos.w > 0.5 && dtS > 0.0) {
+            float remaining = dtS;
+            for (int j = 0; j < 64 && remaining > 0.0; ++j) {
+                float r = max(length(x), 1e-6);
+                float L2 = angMom2(x, v);
+                float lp = lapseOf(x, v);
+                float ts = bh ? bhTimescale(r, L2, length(v)) : 1e30;
+                float h = min(uStep.y * ts / lp, remaining);
+                if (j == 63) h = remaining;
+                float dtau = h * lp;
+                if (bh) v = clampSpeed(v + (0.5 * dtau) * bhAccel(x, L2));
+                x += dtau * v;
+                if (bh && length(x) < R_ACCRETE) x *= R_ACCRETE / max(length(x), 1e-6);
+                if (bh) v = clampSpeed(v + (0.5 * dtau) * bhAccel(x, angMom2(x, v)));
+                remaining -= h;
+            }
+        }
+        cTraj[k + 1] = vec4(x, 0.0);
+    }
+    cEndVel = vec4(v, 0.0);
+}
+
+void main() {
+    int lid = int(gl_LocalInvocationID.x);
+    if (uMode == 1) {
+        if (lid == 0) integrateTrajectory();
+        return;
+    }
+
+    // ---- monopole table: mCum[b] = mass fraction inside bin edge b
+    if (lid == 0) {
+        float invN = 1.0 / uScale.w;
+        float acc = 0.0;
+        for (int b = 0; b <= NBINS; ++b) {
+            mCum[b] = acc;
+            acc += float(mHist[b]) * invN;
+        }
+        mCum[NBINS + 1] = acc;
+    }
+
+    // ---- density peak of grid 0
+    vec4 geo = uGridDep[0];
+    bool have = geo.w > 0.0;
+    float best = 0.0;
+    int bestIdx = -1;
+    if (have) {
+        vec3 sp = gridCoord(geo, cTraj[TRAJ].xyz);
+        ivec3 pc = clamp(ivec3(floor(sp)), ivec3(0), ivec3(RES - 1));
+        const int W = 8;
+        const int S = 2 * W + 1;
+        for (int j = lid; j < S * S * S; j += 256) {
+            ivec3 cc = pc + ivec3(j % S, (j / S) % S, j / (S * S)) - W;
+            if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, ivec3(RES)))) continue;
+            int idx = cellIndex(cc);
+            float rho = cellLive(0, idx) ? gFA[idx].w : 0.0;
+            if (rho > best) {
+                best = rho;
+                bestIdx = idx;
+            }
+        }
+    }
+    shBest[lid] = best;
+    shIdx[lid] = bestIdx;
+    barrier();
+    reduceBest(lid);
+    bool found = shBest[0] > 0.0;
+    barrier();
+    if (have && !found) {
+        best = 0.0;
+        bestIdx = -1;
+        for (int j = lid; j < CELLS; j += 256) {
+            float rho = cellLive(0, j) ? gFA[j].w : 0.0;
+            if (rho > best) {
+                best = rho;
+                bestIdx = j;
+            }
+        }
+        shBest[lid] = best;
+        shIdx[lid] = bestIdx;
+        barrier();
+        reduceBest(lid);
+        found = shBest[0] > 0.0;
+        barrier();
+    }
+    int peak = shIdx[0];
+
+    // ---- mass-weighted mean over the 7^3 cells around the peak
+    vec4 sx = vec4(0.0), sv = vec4(0.0);
+    if (have && found && peak >= 0) {
+        ivec3 pc = ivec3(peak % RES, (peak / RES) % RES, peak / (RES * RES));
+        float cs = gridCell(geo);
+        for (int j = lid; j < 343; j += 256) {
+            ivec3 cc = pc + ivec3(j % 7, (j / 7) % 7, j / 49) - 3;
+            if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, ivec3(RES)))) continue;
+            int idx = cellIndex(cc);
+            if (!cellLive(0, idx)) continue;
+            float rho = gFA[idx].w;
+            vec3 pos = geo.xyz + (vec3(cc) + 0.5 - 0.5 * float(RES)) * cs;
+            sx += vec4(rho * pos, rho);
+            sv += vec4(gFB[idx].xyz, rho * cs * cs * cs * uScale.w);
+        }
+    }
+    shSumX[lid] = sx;
+    shSumV[lid] = sv;
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            shSumX[lid] += shSumX[lid + stride];
+            shSumV[lid] += shSumV[lid + stride];
+        }
+        barrier();
+    }
+    if (lid == 0) {
+        vec4 tx = shSumX[0], tv = shSumV[0];
+        uint n = mCore[0];
+        if (n > 0u && uMono.z > 0.5) {
+            vec3 dx = vec3(decode64(mCore[1], mCore[2]), decode64(mCore[3], mCore[4]), decode64(mCore[5], mCore[6]));
+            vec3 dv = vec3(decode64(mCore[7], mCore[8]), decode64(mCore[9], mCore[10]), decode64(mCore[11], mCore[12]));
+            cPos = vec4(cTraj[TRAJ].xyz + dx * (uMono.w / (CORE_XS * float(n))), 1.0);
+            cVel = vec4(cEndVel.xyz + dv / (CORE_VS * float(n)), float(n));
+        } else if (tx.w > 0.0) {
+            cPos = vec4(tx.xyz / tx.w, 1.0);
+            cVel = vec4(tv.xyz / tx.w, tv.w);
+        } else {
+            cPos = vec4(cTraj[TRAJ].xyz, 0.0);
+            cVel = vec4(0.0);
+        }
+        cInfo = vec4(found ? shBest[0] : 0.0, float(mCore[13]), 0.0, 0.0);
+        // Shape of the gas within 2 d_c: principal axes of its second-moment tensor.
+        vec4 axis = vec4(0.0, 1.0, 0.0, 0.0);
+        if (mCore[14] > 16u) {
+            float n = float(mCore[14]) * CORE_XS;
+            float xx = decode64(mCore[15], mCore[16]) / n, yy = decode64(mCore[17], mCore[18]) / n;
+            float zz = decode64(mCore[19], mCore[20]) / n, xy = decode64(mCore[21], mCore[22]) / n;
+            float xz = decode64(mCore[23], mCore[24]) / n, yz = decode64(mCore[25], mCore[26]) / n;
+            mat3 T = mat3(xx, xy, xz, xy, yy, yz, xz, yz, zz);
+            // Eigenvalues of the symmetric matrix (trigonometric solution), major axis by power iteration.
+            float q = (xx + yy + zz) / 3.0;
+            float p1 = xy * xy + xz * xz + yz * yz;
+            float p2 = (xx - q) * (xx - q) + (yy - q) * (yy - q) + (zz - q) * (zz - q) + 2.0 * p1;
+            float p = sqrt(max(p2 / 6.0, 1e-30));
+            mat3 B = (T - q * mat3(1.0)) / p;
+            float rdet = clamp(determinant(B) * 0.5, -1.0, 1.0);
+            float phi = acos(rdet) / 3.0;
+            float l1 = q + 2.0 * p * cos(phi);
+            float l3 = q + 2.0 * p * cos(phi + 2.0943951);
+            float l2 = 3.0 * q - l1 - l3;
+            vec3 v = normalize(vec3(1.0, 0.7, 0.4));
+            for (int it = 0; it < 32; ++it) v = normalize(T * v + 1e-30);
+            float e = 1.0 - sqrt(max(l2, 0.0) / max(l1, 1e-30));
+            axis = vec4(v, smoothstep(0.1, 0.3, e));
+        }
+        cAxis = axis;
+        cInfo.z = axis.w;
+    }
+}

@@ -1,0 +1,187 @@
+#version 460 core
+// Star disruption: particle initialisation at release.
+//  uMode 0: release of the rigid star; positions stored relative to the centre of mass become
+//           absolute (uRelPos) and every particle gets the centre-of-mass velocity (uRelVel).
+//  uMode 1: samples the grid density rho' at every particle (pAux.w).
+//  uMode 2: per radial bin around the core (monopole bins): sum and count of those densities.
+//  uMode 3: (one workgroup) integrates hydrostatic equilibrium inwards with exactly the operators of
+//           the simulation, dP/dr = -<rho'>(r) g(r), with <rho'> the grid density the particles of the
+//           shell see and g the softened monopole gravity of tde_common.glsl.
+//  uMode 4: u = P(r) / ((gamma - 1) rho') carried by the particle; its entropy
+//           A0 = (gamma - 1) u / rho'^(gamma - 1) is kept as the cooling floor.
+//  uMode 5: net radial acceleration (pressure from the grids + monopole gravity) of every particle,
+//           summed per bin.
+//  uMode 6: (one workgroup) pressure correction dP(r) = -relax * integral_r^inf <rho'> <a_r> dr, which
+//           cancels the remaining net force shell by shell (modes 4-6 are iterated a few times).
+//  uMode 7: freezes the surviving remnant: active particles within uRelVel.x of the core centre
+//           (cPos) and slower than uRelVel.y relative to it become state 4 with offsets from cPos.
+//  uMode 8: thaws it again (absolute position and velocity from uFrozen / uFrozenVel).
+//  uMode 9: removes it as escaped.
+// Modes 7-9 count the particles they change in sWords[S_FROZEN].
+// The grid pressure then balances the monopole gravity shell by shell, so the star starts in the
+// numerical equilibrium of the code rather than in the continuum one (which the smoothing of the
+// grids, a few cells, would turn into a strong pulsation).
+#include "tde_common.glsl"
+
+layout(local_size_x = 256) in;
+
+uniform int uMode;
+uniform vec3 uRelPos;
+uniform vec3 uRelVel;
+
+const float RHO_SCALE = 16777216.0;   // 2^24
+
+int binOf(float d) {
+    float sb = sqrt(d / uMono.x) * float(NBINS);
+    return sb >= float(NBINS) ? NBINS : int(sb);
+}
+
+const float AR_SCALE = 1048576.0;     // 2^20 per q / R^2
+
+float binMeanRho(int b) {
+    return mCnt[b] > 0u ? decode64(mRho[2 * b], mRho[2 * b + 1]) / (RHO_SCALE * float(mCnt[b])) * uVis.x : 0.0;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (uMode == 6) {
+        if (i != 0u) return;
+        float aRef = uEvent.x / (uEvent.y * uEvent.y);
+        float S = 0.0;
+        for (int b = NBINS - 1; b >= 0; --b) {
+            float e0 = uMono.x * float(b) * float(b) / float(NBINS * NBINS);
+            float e1 = uMono.x * float(b + 1) * float(b + 1) / float(NBINS * NBINS);
+            float ar = mCnt[b] > 0u ? decode64(mAr[2 * b], mAr[2 * b + 1]) / (AR_SCALE * float(mCnt[b])) * aRef : 0.0;
+            S += binMeanRho(b) * ar * (e1 - e0);
+            mP[b] = max(mP[b] - 0.8 * S, 0.0);
+        }
+        return;
+    }
+    if (uMode == 3) {
+        if (i != 0u) return;
+        float P = 0.0;
+        mP[NBINS] = 0.0;
+        float eps2 = uMono.y * uMono.y;
+        for (int b = NBINS - 1; b >= 0; --b) {
+            float e0 = uMono.x * float(b) * float(b) / float(NBINS * NBINS);
+            float e1 = uMono.x * float(b + 1) * float(b + 1) / float(NBINS * NBINS);
+            float mid = 0.5 * (e0 + e1);
+            float rho = binMeanRho(b);
+            float s2 = mid * mid + eps2;
+            float g = uEvent.x * monoMass(mid) * mid / (s2 * sqrt(s2));
+            P += rho * g * (e1 - e0);
+            mP[b] = P;
+        }
+        return;
+    }
+    if (i >= uint(uInfo.x)) return;
+    vec4 P = pPos[i];
+    if (uMode >= 7) {
+        if (uMode == 7 && P.w == 0.0) {
+            vec3 d = P.xyz - cPos.xyz;
+            vec3 dv = pVel[i].xyz - cVel.xyz;
+            if (length(d) < uRelVel.x && length(dv) < uRelVel.y) {
+                // The remnant moves rigidly from now on, so its gas carries exactly its velocity.
+                pPos[i] = vec4(d, 4.0);
+                pVel[i].xyz = vec3(0.0);
+                atomicAdd(sWords[S_FROZEN], 1u);
+            }
+        } else if (uMode == 8 && P.w == 4.0) {
+            pPos[i] = vec4(P.xyz + uFrozen.xyz, 0.0);
+            pVel[i].xyz = pVel[i].xyz + uFrozenVel.xyz;
+            atomicAdd(sWords[S_FROZEN], 1u);
+        } else if (uMode == 9 && P.w == 4.0) {
+            pPos[i] = vec4(P.xyz + uFrozen.xyz, 2.0);
+            atomicAdd(sWords[S_FROZEN], 1u);
+            atomicAdd(sWords[S_ESCAPED], 1u);
+        }
+        return;
+    }
+    if (P.w != 0.0) return;
+    if (uMode == 0) {
+        pPos[i] = vec4(P.xyz + uRelPos, 0.0);
+        pVel[i] = vec4(uRelVel, 0.0);
+        pAux[i] = vec4(0.0);
+        return;
+    }
+    if (uMode == 1) {
+        int g = -1;
+        float cell = 0.0;
+        vec3 s = vec3(0.0);
+        for (int k = 0; k < NGRID; ++k) {
+            vec4 geo = uGridFld[k];
+            if (geo.w <= 0.0) continue;
+            float c = gridCell(geo);
+            vec3 sk = gridCoord(geo, P.xyz);
+            if (insideMargin(sk, 0.5) && (g < 0 || c < cell)) {
+                g = k;
+                cell = c;
+                s = sk;
+            }
+        }
+        float rho = 1e-30;
+        if (g >= 0) {
+            vec4 fa, fb;
+            float fc;
+            sampleFields(g, s, fa, fb, fc);
+            rho = max(fa.w, 1e-30);
+        }
+        pAux[i].w = rho;
+        return;
+    }
+    float d = length(P.xyz - cPos.xyz);
+    int b = binOf(d);
+    float rho = pAux[i].w;
+    if (uMode == 5) {
+        if (b >= NBINS || d <= 0.0) return;
+        int g = -1;
+        float cell = 0.0;
+        vec3 s = vec3(0.0);
+        for (int k = 0; k < NGRID; ++k) {
+            vec4 geo = uGridFld[k];
+            if (geo.w <= 0.0) continue;
+            float c = gridCell(geo);
+            vec3 sk = gridCoord(geo, P.xyz);
+            if (insideMargin(sk, 3.0) && (g < 0 || c < cell)) {
+                g = k;
+                cell = c;
+                s = sk;
+            }
+        }
+        vec3 a = vec3(0.0);
+        if (g >= 0) {
+            vec4 fa, fb;
+            float fc;
+            sampleFields(g, s, fa, fb, fc);
+            if (fa.w > 1e-30) a = -fa.xyz / fa.w;
+        }
+        float ts;
+        a += selfGravity(P.xyz, cPos.xyz, ts);
+        float ar = dot(a, (P.xyz - cPos.xyz) / d) / (uEvent.x / (uEvent.y * uEvent.y));
+        int v = int(clamp(ar * AR_SCALE, -2.0e9, 2.0e9));
+        uint lo = uint(v), hi = v < 0 ? 0xFFFFFFFFu : 0u;
+        uint old = atomicAdd(mAr[2 * b], lo);
+        uint hiAdd = hi + ((old + lo < old) ? 1u : 0u);
+        if (hiAdd != 0u) atomicAdd(mAr[2 * b + 1], hiAdd);
+        return;
+    }
+    if (uMode == 2) {
+        if (b >= NBINS) return;
+        uint v = uint(min(rho / uVis.x * RHO_SCALE + 0.5, 4.0e9));
+        uint old = atomicAdd(mRho[2 * b], v);
+        if (old + v < old) atomicAdd(mRho[2 * b + 1], 1u);
+        atomicAdd(mCnt[b], 1u);
+        return;
+    }
+    // uMode 4
+    float pr = 0.0;
+    if (b < NBINS) {
+        float e0 = uMono.x * float(b) * float(b) / float(NBINS * NBINS);
+        float e1 = uMono.x * float(b + 1) * float(b + 1) / float(NBINS * NBINS);
+        pr = mix(mP[b], mP[b + 1], clamp((d - e0) / max(e1 - e0, 1e-30), 0.0, 1.0));
+    }
+    float u = pr / ((GAMMA - 1.0) * rho);
+    float A = (GAMMA - 1.0) * u / pow(rho, GAMMA - 1.0);
+    pVel[i].w = u;
+    pAux[i] = vec4(A, 0.0, u, rho);
+}

@@ -1,0 +1,77 @@
+#version 460 core
+// Star disruption: adds black-hole nest level uFine into level uFine + 1 (all words, including the
+// part owned by grid 0). The nest is concentric with half sizes in a power-of-two ratio uRatio, so every
+// coarse cell inside the fine level's box covers exactly uRatio^3 fine cells, which lie in one block.
+// T = min(64, uRatio^3) threads sum each coarse cell's fine cells and reduce in shared memory; one
+// thread then adds the sums into the coarse cell (it is the only writer).
+#include "tde_common.glsl"
+
+layout(local_size_x = 64) in;
+
+uniform int uFine;
+uniform int uRatio;
+
+const int NPAIR = 7;   // momentum x, y, z, energy, heat, owned energy, owned heat
+shared uint shMass[64];
+shared uint shOwn[64];
+shared uvec2 shW[64][NPAIR];
+
+int pairWord(int w) { return w < 5 ? W_MOM + 2 * w : (w == 5 ? W_OWN_ENER : W_OWN_HEAT); }
+
+void main() {
+    int lid = int(gl_LocalInvocationID.x);
+    int f = uRatio;
+    int f3 = f * f * f;
+    int T = min(64, f3);
+    int perGroup = 64 / T;
+    int n = RES / f;
+    int local = int(gl_WorkGroupID.x) * perGroup + lid / T;
+    int lt = lid % T;
+    bool valid = local < n * n * n;
+    ivec3 cl = ivec3(local % n, (local / n) % n, local / (n * n));
+    bool touched = valid && (gBlk[uFine * BLOCKS + blockOfCell(cellIndex(cl * f))] & 1u) != 0u;
+    uint mass = 0u, own = 0u;
+    uvec2 acc[NPAIR];
+    for (int w = 0; w < NPAIR; ++w) acc[w] = uvec2(0u);
+    if (touched) {
+        for (int j = lt; j < f3; j += T) {
+            ivec3 fo = ivec3(j % f, (j / f) % f, j / (f * f));
+            int cell = cellIndex(cl * f + fo);
+            mass += gAcc[accIndex(uFine, W_MASS, cell)];
+            own += gAcc[accIndex(uFine, W_OWN_MASS, cell)];
+            for (int w = 0; w < NPAIR; ++w) {
+                int idx = accIndex(uFine, pairWord(w), cell);
+                acc[w] = add64(acc[w], uvec2(gAcc[idx], gAcc[idx + CELLS]));
+            }
+        }
+    }
+    shMass[lid] = mass;
+    shOwn[lid] = own;
+    for (int w = 0; w < NPAIR; ++w) shW[lid][w] = acc[w];
+    barrier();
+    for (int stride = T / 2; stride > 0; stride /= 2) {
+        if (lt < stride) {
+            shMass[lid] += shMass[lid + stride];
+            shOwn[lid] += shOwn[lid + stride];
+            for (int w = 0; w < NPAIR; ++w) shW[lid][w] = add64(shW[lid][w], shW[lid + stride][w]);
+        }
+        barrier();
+    }
+    if (touched && lt == 0) {
+        int off = RES * (f - 1) / (2 * f);
+        int cell = cellIndex(cl + off);
+        int g = uFine + 1;
+        bool nonzero = shMass[lid] != 0u;
+        gAcc[accIndex(g, W_MASS, cell)] += shMass[lid];
+        gAcc[accIndex(g, W_OWN_MASS, cell)] += shOwn[lid];
+        for (int w = 0; w < NPAIR; ++w) {
+            int idx = accIndex(g, pairWord(w), cell);
+            uvec2 add = shW[lid][w];
+            nonzero = nonzero || add != uvec2(0u);
+            uvec2 sum = add64(uvec2(gAcc[idx], gAcc[idx + CELLS]), add);
+            gAcc[idx] = sum.x;
+            gAcc[idx + CELLS] = sum.y;
+        }
+        if (nonzero) markTouched(g, cell);
+    }
+}

@@ -229,7 +229,7 @@ vec3 shadeBodySurface(Body b, vec3 n, vec3 viewDir) {
         uint seed = uint(b.look.y);
         float teff = b.lightColor.a;
         float cool = clamp((7500.0 - teff) / 2500.0, 0.0, 1.0);
-        float freq = b.look.z > 0.0 ? b.look.z : 70.0;               // convection cells per radius
+        float freq = b.look.z > 0.0 ? b.look.z : 70.0;               // convection cells per radius (look.z < 0: disrupted star)
         float tt = uTime * 0.02;
         float g1 = fbm3(p * freq + vec3(0.0, tt, 0.0), 3, 0.55, seed);
         float lanes = smoothstep(0.0, 0.35, abs(g1));                 // 0 in the dark lanes between cells
@@ -242,8 +242,11 @@ vec3 shadeBodySurface(Body b, vec3 n, vec3 viewDir) {
         float faculae = (1.0 - mu) * smoothstep(0.2, 0.5, sg) * 0.25 * cool;   // bright patches near the limb
         float tLocal = teff * (0.84 + 0.16 * pow(mu, 0.4)) * (1.0 - 0.2 * spot - 0.2 * umbra) * (0.98 + 0.04 * sg);
         float I = b.light.w * limb * gran * (1.0 - 0.5 * spot - 0.4 * umbra) * (1.0 + faculae);
-        // Normalise by the brightest channel of the star's colour (not its luminance), so red and blue
-        // stars keep their colour instead of washing out to cream in the tone mapper's highlights.
+        // A star being disrupted (look.z < 0) uses the gas's brightness law, B(T) x visible luminance x
+        // the gas brightness, so the switch from sphere to gas at release is seamless.
+        if (b.look.z < 0.0) return blackbody(tLocal).rgb * (I * blackbody(teff).a);
+        // Otherwise normalise by the brightest channel of the star's colour (not its luminance), so red
+        // and blue stars keep their colour instead of washing out to cream in the tone mapper.
         vec3 base = blackbody(teff).rgb;
         return blackbody(tLocal).rgb * (I / max(max(base.r, max(base.g, base.b)), 1e-3));
     }

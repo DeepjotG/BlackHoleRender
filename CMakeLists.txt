@@ -173,3 +173,8 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/RealUniverse.cpp AND EXISTS ${CMAKE_S
   target_link_libraries(real_universe_tests PRIVATE bhs_core Threads::Threads)
   add_test(NAME real_universe_tests COMMAND real_universe_tests ${CMAKE_SOURCE_DIR}/assets)
 endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tests/tde_tests.cpp)
+  add_executable(tde_tests tests/tde_tests.cpp)
+  target_link_libraries(tde_tests PRIVATE bhs_core)
+  add_test(NAME tde_tests COMMAND tde_tests)
+endif()
