@@ -249,6 +249,8 @@ int App::run(const Options& opt) {
     if (opt.mass > 0.0) settings_.bhMassSolar = opt.mass;
     if (opt.warp >= 0.0) settings_.timeWarp = opt.warp;
     if (opt.universe >= 0) settings_.universeMode = opt.universe;
+    if (opt.universeSeed >= 0) settings_.universeSeed = static_cast<uint32_t>(opt.universeSeed);
+    if (opt.placement >= 0) settings_.realPlacement = opt.placement;
     debugView_ = opt.debugView;
     simTime_ = opt.startTime;
 

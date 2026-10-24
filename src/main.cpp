@@ -19,7 +19,7 @@ void usage() {
         "  --warp X                 simulated seconds per real second\n"
         "  --goto NAME              start next to a planet (Miller, Mann, Edmunds) or the black hole\n"
         "  --fly NAME               start a flight to a target at launch\n"
-        "  --universe backdrop|invented|real\n"
+        "  --universe backdrop|invented|real  --universe-seed N  --placement sgra|sun\n"
         "  --preset low|medium|high|ultra\n"
         "  --bookmark N             start at bookmark 1-4\n"
         "  --pos x,y,z              camera position (M units); --target x,y,z look-at point\n"
@@ -67,6 +67,11 @@ int main(int argc, char** argv) {
         else if (a == "--warp") o.warp = std::stod(next());
         else if (a == "--goto") o.gotoTarget = next();
         else if (a == "--fly") o.flyTarget = next();
+        else if (a == "--universe-seed") o.universeSeed = std::stoll(next());
+        else if (a == "--placement") {
+            const std::string p = next();
+            o.placement = (p == "sun" || p == "1") ? 1 : 0;
+        }
         else if (a == "--universe") {
             const std::string u = next();
             if (u == "backdrop") o.universe = 0;

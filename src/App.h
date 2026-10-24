@@ -49,6 +49,8 @@ struct Options {
     std::string gotoTarget;     // --goto NAME: start next to a planet or the black hole
     std::string flyTarget;      // --fly NAME: start a flight to a target at launch
     int universe = -1;          // --universe backdrop|invented|real
+    long long universeSeed = -1; // --universe-seed N
+    int placement = -1;         // --placement sgra|sun
     std::string screenshot;
     std::string cinematic;
     int captureW = 3840, captureH = 2160, captureSamples = 24;

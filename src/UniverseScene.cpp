@@ -196,7 +196,8 @@ void UniverseScene::appendPlanetarySystem(const universe::StarRecord& st, const 
         b.lightIntensity = static_cast<float>(std::clamp(1.6 * std::pow(std::sqrt(L) / std::max(dAU, 0.01), 0.7), 0.05, 4.0));
         b.lightColor = blackbodyColor(st.teff);
         char buf[160];
-        std::snprintf(buf, sizeof buf, "planet of %s, %.2f AU out, about %.0f K", starName.c_str(), a, teq);
+        std::snprintf(buf, sizeof buf, "planet of %s, %.2f AU out, about %.0f K%s", starName.c_str(), a, teq,
+                      b.ringOuter > 0.0 ? ", with rings" : "");
         b.info = buf;
         bodies.push_back(b);
     }
