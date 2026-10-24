@@ -49,6 +49,10 @@ struct UiContext {
     const std::vector<UniverseTarget>* uniTargets = nullptr;
     const char* universeStatus = "";
     const char* universeError = "";
+    bool galaxiesMissing = false;   // real universe without its galaxy catalogue
+    int fetchState = 0;             // CatalogFetch::State
+    const char* fetchLine = "";
+    bool* fetchRequest = nullptr;
     size_t uniStars = 0;
     double simJulianDate = 0.0;
 };

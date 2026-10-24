@@ -18,8 +18,8 @@ python3 -I tools/fetch_real_catalogs.py --offline       # uses only the cache
 python3 -I tools/fetch_real_catalogs.py --cache DIR --out DIR --refresh
 ```
 
-Only the Python standard library is used. Downloads go to
-`/home/chubs/.claude/jobs/449dea01/tmp/real/cache` by default (`--cache` overrides) and are reused.
+Only the Python standard library is used. Downloads go to `~/.cache/blackhole-simulator/catalogs`
+(or `$XDG_CACHE_HOME/blackhole-simulator/catalogs`) by default (`--cache` overrides) and are reused.
 Every input is verified before use, in the cache and after each download:
 
 * Static archive files (HYG v4.4, the UNGC, McConnachie and 2MRS tables) against pinned SHA-256

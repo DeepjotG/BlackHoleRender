@@ -409,8 +409,8 @@ bool UniverseScene::configure(int mode, uint32_t seed, int placement, const std:
                   content_.stars.size(), content_.galaxies.size(), (glfwGetTime() - t0) * 1000.0);
     status_ = buf;
     if (mode == 2 && content_.galaxies.empty())
-        status_ += "\nNo galaxy catalogue yet: run  python3 tools/fetch_real_catalogs.py  to download ~30,000 real\n"
-                   "galaxies for your own use (a few minutes; the file is not distributed with the code).";
+        status_ += "\nNo galaxy catalogue yet: it is downloaded on your machine (the tables may not be\n"
+                   "redistributed). Use the button below, or run  python3 tools/fetch_real_catalogs.py";
     logInfo("{}", status_);
     return true;
 }

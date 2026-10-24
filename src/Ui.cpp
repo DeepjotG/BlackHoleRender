@@ -270,6 +270,18 @@ void Ui::draw(UiContext& c) {
         }
         if (c.universeError && c.universeError[0]) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s", c.universeError);
         else ImGui::TextDisabled("%s", c.universeStatus);
+        if (s.universeMode == 2 && (c.galaxiesMissing || c.fetchState != 0) && c.fetchRequest) {
+            if (c.fetchState == 1) {
+                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "Downloading the real galaxies (a few minutes)...");
+                ImGui::TextDisabled("%s", c.fetchLine);
+            } else {
+                if (c.fetchState == 3) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "Download failed: %s", c.fetchLine);
+                if (ImGui::Button("Download the real galaxies (~45,000)")) *c.fetchRequest = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Runs tools/fetch_real_catalogs.py: downloads the Local Group, nearby-galaxy and 2MASS\n"
+                                      "redshift-survey tables (they may not be redistributed) and builds the catalogue here.");
+            }
+        }
         if (s.universeMode != 0 && c.uniStars) ImGui::TextDisabled("%zu stars in view range", c.uniStars);
     }
 

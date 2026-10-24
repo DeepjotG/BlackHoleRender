@@ -35,7 +35,8 @@ import zlib
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(SCRIPT_DIR)
-DEFAULT_CACHE = '/home/chubs/.claude/jobs/449dea01/tmp/real/cache'
+DEFAULT_CACHE = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.join(os.path.expanduser('~'), '.cache'),
+                             'blackhole-simulator', 'catalogs')
 DEFAULT_OUT = os.path.join(REPO_DIR, 'assets', 'real')
 
 FORMAT_VERSION = 1

@@ -560,6 +560,11 @@ void App::frame() {
         ctx.uniTargets = &universe_.targets();
         ctx.universeStatus = universe_.status().c_str();
         ctx.universeError = universeError_.c_str();
+        ctx.galaxiesMissing = settings_.universeMode == 2 && universe_.active() && universe_.content().galaxies.empty();
+        ctx.fetchState = static_cast<int>(catalogFetch_.state());
+        fetchLine_ = catalogFetch_.lastLine();
+        ctx.fetchLine = fetchLine_.c_str();
+        ctx.fetchRequest = &fetchRequest_;
         ctx.uniStars = universe_.starCount();
         ctx.simJulianDate = universe_.julianDate(simSeconds_);
         ui_.draw(ctx);
@@ -822,6 +827,20 @@ void App::updateTde(double dtM) {
 }
 
 void App::updateWorld(float dt, const Camera::Input& in) {
+    static bool fetchAuto = std::getenv("BHS_FETCH_CATALOG") != nullptr;   // test hook: press the button at start
+    if (fetchAuto && settings_.universeMode == 2) {
+        fetchAuto = false;
+        fetchRequest_ = true;
+    }
+    if (fetchRequest_) {
+        fetchRequest_ = false;
+        catalogFetch_.start(appRoot_);
+        logInfo("downloading the real galaxy catalogue in the background");
+    }
+    if (catalogFetch_.takeFinished()) {   // new catalogue files: reload the real universe
+        logInfo("real galaxy catalogue downloaded; reloading the universe");
+        uniModeApplied_ = -1;
+    }
     applyUniverseSettings();
     // Simulated time: the warp sets how many seconds pass per real second.
     const double dtSim = settings_.paused ? 0.0 : settings_.timeWarp * static_cast<double>(dt);

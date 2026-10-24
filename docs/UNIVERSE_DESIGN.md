@@ -44,7 +44,7 @@ it inside your own files.
 
 * Only create or edit files listed for your module. Do not touch `CMakeLists.txt`, other sources,
   shaders or the main checkout at `/mnt/storage/BlackholeSimulation` (the user runs the app from it).
-* Build and test with your own commands in `/home/chubs/.claude/jobs/449dea01/tmp/<worker>/`
+* Build and test with your own commands in a private scratch directory (`<job tmp>/<worker>/` during development)
   (direct `g++ -std=c++20` or a private CMake project). Useful prebuilt pieces:
   * GLM headers: `/mnt/storage/BlackholeSimulation/build/_deps/glm-src`
   * glad (GL 4.6 core): headers `/mnt/storage/BlackholeSimulation/build/gladsources/glad_gl_core_46/include`,

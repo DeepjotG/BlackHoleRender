@@ -11,6 +11,7 @@
 #include "Renderer.h"
 #include "Settings.h"
 #include "TdeControls.h"
+#include "CatalogFetch.h"
 #include "UniverseScene.h"
 #include "tde/TdeSim.h"
 #include "SkyBaker.h"
@@ -99,6 +100,9 @@ private:
     uint32_t uniSeedApplied_ = 0;
     int uniPlacementApplied_ = -1;
     std::string universeError_;
+    CatalogFetch catalogFetch_;          // background download of the real galaxy catalogue
+    std::string fetchLine_;
+    bool fetchRequest_ = false;
     void applyUniverseSettings();
     TdeControls tdeCtl_;
     std::vector<GasVolumeRef> gasRefs_;

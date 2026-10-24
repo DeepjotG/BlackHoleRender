@@ -131,10 +131,11 @@ The *Universe* panel switches between three skies:
 * **Real 3D universe:** 119,613 real stars from the HYG catalogue, a model of the Milky Way and the
   solar system's planets at today's positions. The black hole is Sagittarius A* at the centre of the
   Milky Way (with its real mass, 4.3 million suns), or a fictional Gargantua placed near the Sun so
-  the real constellations surround it. About 30,000 real galaxies (the Local Group, the Updated
+  the real constellations surround it. About 45,000 real galaxies (the Local Group, the Updated
   Nearby Galaxy Catalog and the 2MASS Redshift Survey, with Andromeda, M81, M51...) come from
-  tables that may not be redistributed, so they are downloaded once on your machine:
-  `python3 tools/fetch_real_catalogs.py` (a few minutes; see `assets/real/README.md`).
+  tables that may not be redistributed, so they are downloaded once on your machine: press
+  *Download the real galaxies* in the Universe panel, or run `python3 tools/fetch_real_catalogs.py`
+  (a few minutes; see `assets/real/README.md`).
 
 How it is drawn: the stars are projected from the camera every frame on the GPU and looked up by
 the ray tracer through the same lensing-aware math as before, so real stars stretch into arcs
