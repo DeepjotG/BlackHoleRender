@@ -57,19 +57,26 @@ void gasSample(vec3 p, float ds, inout vec3 color, inout float transmittance) {
         float fade = smoothstep(0.5, 2.0, min(edge.x, min(edge.y, edge.z)));
         float k = max(g.r, 0.0) * uGasOpacity * fade;
         if (k <= 0.0 && g.b <= 0.0) continue;
-        float a = 1.0 - exp(-k * ds);
-        // Emission grows with density squared until the gas is optically thick within a texel (as for
-        // free-free emission): dense streams and the forming disk glow, while tenuous envelopes and the
-        // sparse particles in the coarse volumes stay faint smoke instead of a glowing haze.
         float texel = 2.0 * uGasBox[i].w / max(uGasRes[i], 1.0);
-        float glow = max(g.b, 0.0) * clamp(max(g.r, 0.0) * texel / 0.5, 0.0, 1.0);
-        // Turbulent texture: the grids resolve the debris' shape but not its surface detail, so the
-        // emission and temperature get slowly drifting mottling (two noise cells per volume half-size).
-        // Absorption is left alone, keeping the simulated shape.
+        // Turbulent texture: the grids resolve the debris' shape but not its fine structure. Billows
+        // (two noise cells per volume half-size) and filaments mottle the emission and temperature, and
+        // texel-scale detail noise erodes the thin outskirts of the gas into wisps (as for game clouds):
+        // dense cores stay solid, tenuous regions break up instead of reading as a soft blur.
         vec3 q = (p - uGasBox[i].xyz) / uGasBox[i].w;
         float n1 = texture(uNoise3d, q * 0.5 + vec3(0.0, uTime * 0.01, 0.0)).r;
         float n2 = texture(uNoise3d, q * 2.1 + vec3(0.37, 0.61 - uTime * 0.02, 0.11)).r;
         float turb = smoothstep(0.25, 0.75, 0.65 * n1 + 0.35 * n2);   // billows (coarse) with filaments (fine)
+        float nd = texture(uNoise3d, q * (uGasRes[i] / 11.0) + vec3(0.71, 0.29, 0.53) + vec3(uTime * 0.03)).r;
+        float dn = clamp(max(g.r, 0.0) * texel / 0.5, 0.0, 1.0);        // density on a 0..1 scale
+        float er = (1.0 - smoothstep(0.3, 0.7, nd)) * 0.7 * (1.0 - turb * 0.5);
+        float dEroded = clamp((dn - er) / max(1.0 - er, 0.05), 0.0, 1.0);
+        float keep = dn > 0.0 ? dEroded / dn : 0.0;
+        k *= keep;
+        float a = 1.0 - exp(-k * ds);
+        // Emission grows with density squared until the gas is optically thick within a texel (as for
+        // free-free emission): dense streams and the forming disk glow, while tenuous envelopes and the
+        // sparse particles in the coarse volumes stay faint smoke instead of a glowing haze.
+        float glow = max(g.b, 0.0) * dEroded;
         glow *= 0.25 + 1.5 * turb;
         vec4 bb = blackbody(max(g.g, 0.0) * 1e4 * (0.85 + 0.3 * turb));
         // Contract: color += T * (1 - exp(-r ds)) * B(T_gas) * b; T *= exp(-r ds). The brightest debris
