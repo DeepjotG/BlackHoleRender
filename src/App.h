@@ -41,6 +41,8 @@ struct Options {
     float doppler = -1.0f;
     float exposure = -1.0f;
     double startTime = 0.0;
+    int tdeScenario = 0;        // --tde N: start star-disruption scenario N (1-based)
+    double fixedDt = 0.0;       // --dt S: fixed frame time (reproducible animation captures)
     unsigned seed = 0;
     bool hasPos = false, hasTarget = false;
     glm::vec3 pos{0.0f}, target{0.0f};
@@ -128,7 +130,8 @@ private:
 
     double lastTime_ = 0.0;
     double simTime_ = 0.0;
-    double diskClock_ = 0.0;             // disk flow clock in M, wrapped to the cross-fade period
+    double diskClock_ = 0.0;
+    double fixedDt_ = 0.0;               // --dt: fixed frame time for reproducible captures             // disk flow clock in M, wrapped to the cross-fade period
     double reloadTimer_ = 0.0;
     double skyDirtyFor_ = 0.0;
     int lastDebugView_ = 0;

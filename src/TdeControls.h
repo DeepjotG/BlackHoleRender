@@ -50,6 +50,24 @@ struct TdeControls {
     bool watchRequested = false;   // move the camera to a viewpoint that frames the event
     bool autoWarp = true;          // keep the time warp matched to the event's current pace
     bool moduleAvailable = false;  // false while the simulation module is not built
+
+    void applyStarPreset(int i) {
+        starPreset = i;
+        const StarPreset& sp = kStarPresets[i];
+        massSolar = sp.massSolar;
+        radiusSolar = sp.radiusSolar;
+        teff = sp.teff;
+        polytropeN = sp.polytropeN;
+    }
+    // Selects a ready-made event; returns the black hole mass it needs.
+    double applyScenario(int i) {
+        scenario = i;
+        const TdeScenario& sc = kTdeScenarios[i];
+        applyStarPreset(sc.starPreset);
+        beta = sc.beta;
+        inclinationDeg = sc.inclinationDeg;
+        return sc.bhMassSolar;
+    }
 };
 
 }  // namespace bhs

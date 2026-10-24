@@ -363,20 +363,11 @@ void Ui::draw(UiContext& c) {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "The simulation module is not in this build yet.");
         const char* scen[kTdeScenarioCount];
         for (int i = 0; i < kTdeScenarioCount; ++i) scen[i] = kTdeScenarios[i].name;
-        if (ImGui::Combo("Scenario", &t.scenario, scen, kTdeScenarioCount)) {
-            const TdeScenario& sc = kTdeScenarios[t.scenario];
-            s.bhMassSolar = sc.bhMassSolar;
-            t.starPreset = sc.starPreset;
-            const StarPreset& sp = kStarPresets[sc.starPreset];
-            t.massSolar = sp.massSolar; t.radiusSolar = sp.radiusSolar; t.teff = sp.teff; t.polytropeN = sp.polytropeN;
-            t.beta = sc.beta;
-            t.inclinationDeg = sc.inclinationDeg;
-        }
+        if (ImGui::Combo("Scenario", &t.scenario, scen, kTdeScenarioCount)) s.bhMassSolar = t.applyScenario(t.scenario);
         const char* stars[kStarPresetCount];
         for (int i = 0; i < kStarPresetCount; ++i) stars[i] = kStarPresets[i].name;
         if (ImGui::Combo("Star", &t.starPreset, stars, kStarPresetCount)) {
-            const StarPreset& sp = kStarPresets[t.starPreset];
-            t.massSolar = sp.massSolar; t.radiusSolar = sp.radiusSolar; t.teff = sp.teff; t.polytropeN = sp.polytropeN;
+            t.applyStarPreset(t.starPreset);
         }
         sliderLogD("Star mass (suns)", &t.massSolar, 0.08, 150.0, "%.3g");
         sliderLogD("Star radius (suns)", &t.radiusSolar, 0.005, 2000.0, "%.3g");

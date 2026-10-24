@@ -275,6 +275,15 @@ int App::run(const Options& opt) {
     if (!universe_.init()) logWarn("3D universe shaders failed to compile; only the painted backdrop is available");
     applyUniverseSettings();
     if (!tdeCtl_.moduleAvailable) logInfo("star-disruption simulation not available in this build");
+    if (opt.tdeScenario >= 1 && opt.tdeScenario <= kTdeScenarioCount) {
+        if (tdeCtl_.moduleAvailable) {
+            settings_.bhMassSolar = tdeCtl_.applyScenario(opt.tdeScenario - 1);
+            tdeCtl_.spawnRequested = true;
+        } else {
+            logWarn("--tde ignored: the star-disruption simulation is not in this build");
+        }
+    }
+    fixedDt_ = opt.fixedDt;
 
     const auto& bms = Camera::defaultBookmarks();
     if (opt.bookmark >= 1 && opt.bookmark <= static_cast<int>(bms.size()))
@@ -395,7 +404,7 @@ void App::frame() {
         return;
     }
     const double now = glfwGetTime();
-    const float dt = static_cast<float>(std::min(now - lastTime_, 0.1));
+    const float dt = fixedDt_ > 0.0 ? static_cast<float>(fixedDt_) : static_cast<float>(std::min(now - lastTime_, 0.1));
     lastTime_ = now;
 
     Camera::Input in;
