@@ -550,7 +550,11 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
         if (glm::length(major) < 1e-9) major = glm::cross(dirR, std::abs(dirR.y) < 0.9 ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0));
         major = glm::normalize(major);
         const bool ell = m.type == universe::GalaxyType::Elliptical || m.type == universe::GalaxyType::Lenticular;
-        const double q = ell ? m.ellipticalAxisRatio : std::max(std::abs(glm::dot(nR, dirR)), 0.12);
+        // Projected axis ratio: ellipticals and S0s carry it; disks follow their inclination and intrinsic
+        // thickness Q (irregulars are thick and carry Q in ellipticalAxisRatio).
+        const double ci = std::abs(glm::dot(nR, dirR));
+        const double Q = m.type == universe::GalaxyType::Irregular ? std::clamp(m.ellipticalAxisRatio, 0.1, 1.0) : 0.18;
+        const double q = ell ? m.ellipticalAxisRatio : std::sqrt(ci * ci + Q * Q * (1.0 - ci * ci));
         const float type = ell ? 0.0f : (m.type == universe::GalaxyType::BarredSpiral ? 2.0f : 1.0f);
         SpriteGpu s;
         s.dirCos = glm::vec4(glm::vec3(dirR), static_cast<float>(std::cos(theta)));

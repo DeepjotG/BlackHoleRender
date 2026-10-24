@@ -28,12 +28,17 @@ inline double eccentricAnomaly(double M, double e) {
 }
 
 // Heliocentric ecliptic J2000 position (AU) at T Julian centuries after J2000.
+// The secular rates are fits valid for a few thousand years: beyond +-30 centuries the orbit's shape
+// and orientation stay at their limit while the planet keeps moving along it.
+inline double secularT(double T) { return std::clamp(T, -30.0, 30.0); }
+
 inline glm::dvec3 position(const universe::OrbitElements& el, double T) {
     const double d2r = kPi / 180.0;
-    const double a = el.aAU + el.aRate * T;
-    const double e = std::clamp(el.e + el.eRate * T, 0.0, 0.99);
-    const double I = (el.iDeg + el.iRate * T) * d2r, L = (el.LDeg + el.LRate * T) * d2r;
-    const double varpi = (el.varpiDeg + el.varpiRate * T) * d2r, Om = (el.OmegaDeg + el.OmegaRate * T) * d2r;
+    const double Ts = secularT(T);
+    const double a = std::max(el.aAU + el.aRate * Ts, 1e-6);
+    const double e = std::clamp(el.e + el.eRate * Ts, 0.0, 0.99);
+    const double I = (el.iDeg + el.iRate * Ts) * d2r, L = (el.LDeg + std::fmod(el.LRate * T, 360.0)) * d2r;
+    const double varpi = (el.varpiDeg + el.varpiRate * Ts) * d2r, Om = (el.OmegaDeg + el.OmegaRate * Ts) * d2r;
     const double w = varpi - Om;
     const double E = eccentricAnomaly(L - varpi, e);
     const double xp = a * (std::cos(E) - e), yp = a * std::sqrt(1.0 - e * e) * std::sin(E);
@@ -46,7 +51,8 @@ inline glm::dvec3 position(const universe::OrbitElements& el, double T) {
 // Unit normal of the orbit plane (ecliptic J2000).
 inline glm::dvec3 pole(const universe::OrbitElements& el, double T) {
     const double d2r = kPi / 180.0;
-    const double I = (el.iDeg + el.iRate * T) * d2r, Om = (el.OmegaDeg + el.OmegaRate * T) * d2r;
+    const double Ts = secularT(T);
+    const double I = (el.iDeg + el.iRate * Ts) * d2r, Om = (el.OmegaDeg + el.OmegaRate * Ts) * d2r;
     return {std::sin(I) * std::sin(Om), -std::sin(I) * std::cos(Om), std::cos(I)};
 }
 
