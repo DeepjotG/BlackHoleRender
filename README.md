@@ -119,10 +119,15 @@ The *Universe* panel switches between three skies:
 
 * **Painted backdrop:** the original look. Galaxies, nebulae and the Milky Way are painted onto a
   sky infinitely far away; it is lensed correctly but nothing in it has a position.
-* **Invented 3D universe:** a generated universe (change the seed for another one). Every star has
-  a real position, so stars shift as you fly past them; the black hole sits in the disk of a spiral
-  galaxy whose band crosses the sky, and thousands of other galaxies are scattered through clusters
-  and filaments. You can fly into any of them.
+* **Invented 3D universe:** a generated universe (change the seed for another one). The black hole
+  sits on a spiral arm of a Milky-Way-sized galaxy (often barred), with its spin tilted so the
+  galaxy's band and glowing bulge cross behind it, lensed into an Einstein ring around the shadow.
+  Every star has a real position: about 200,000 are generated around you from the galaxy's
+  structure (blue giants crowd the arms, orange giants the old disk), and the ones you fly close to
+  have planets. A few notable stars nearby have names (a blue and a red supergiant, a Sun-like
+  star, a white dwarf, a binary...). Satellite galaxies, a big neighbour spiral and ~29,000
+  galaxies in clusters, groups and filaments fill the universe. You can fly into any of them, or
+  look at your own galaxy from outside.
 * **Real 3D universe:** real stars from the HYG catalogue, real galaxies from galaxy surveys, a model
   of the Milky Way and the solar system's planets at today's positions. The black hole is
   Sagittarius A* at the centre of the Milky Way (with its real mass, 4.3 million suns), or a
@@ -130,10 +135,11 @@ The *Universe* panel switches between three skies:
 
 How it is drawn: the stars are projected from the camera every frame on the GPU and looked up by
 the ray tracer through the same lensing-aware math as before, so real stars stretch into arcs
-around the black hole. Unresolved starlight, dust lanes and nearby galaxies are ray-marched through
-3D galaxy models into a sky texture rebuilt from wherever you are (one cube face per frame);
-distant galaxies are drawn as images oriented as they are in space. Stars close to the camera
-become glowing discs, and planets become lensed spheres.
+around the black hole. Galaxies are 3D models (bulge, bar, a disk of old stars, spiral arms of
+young blue stars with pink star-forming nebulae, and dust that reddens what lies behind it); their
+light is ray-marched into a sky texture rebuilt from wherever you are, a strip at a time while you
+travel. Distant galaxies are drawn as images oriented as they are in space. Stars close to the
+camera become glowing, boiling discs with spots, and planets become lensed spheres.
 
 **Travelling:** the *Travel* panel lists every named star, galaxy and place, with a search box and a
 *Surprise me* button; flights cross any distance in a few seconds. In free flight the speed
@@ -187,7 +193,10 @@ The gas is rendered with the same lensing as everything else.
 --fullscreen --width W --height H --seed N --vsync 0|1 --no-ui --no-capture
 --mass SUNS --warp X             black hole mass, simulated seconds per real second
 --universe backdrop|invented|real  which sky to start with
---goto NAME | --fly NAME         start next to / fly to Miller, Mann, Edmunds or "black hole"
+--universe-seed N  --placement sgra|sun   invented universe seed; where the real black hole is
+--fov DEG                        vertical field of view
+--goto NAME | --fly NAME         start next to / fly to Miller, Mann, Edmunds, "black hole",
+                                 "nearest star", or any star, galaxy or place in the Travel list
 --igpu                           render on the integrated GPU
 --x11 | --wayland                force a window system (see "Which GPU renders" above)
 --gl-debug                       print OpenGL driver errors and warnings

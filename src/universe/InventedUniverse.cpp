@@ -325,7 +325,7 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
         v.radius = 2.2 * kMpc;
         nodes.push_back(v);
         const std::string cn = names.proper() + " Cluster";
-        out.places.push_back({cn, v.pos, 1.6 * kMpc});
+        out.places.push_back({cn, v.pos, 0.7 * kMpc});   // arrive ~1.4 Mpc from the core
         // Groups and clusters: richness ~ power law, positions uniform in volume beyond the local group.
         while (nodes.size() < 1100) {
             Node n;
