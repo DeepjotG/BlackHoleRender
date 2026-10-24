@@ -703,7 +703,7 @@ void App::buildBodies() {
         b.vel = tde_.starVelocity();
         b.radius = tde_.starRadiusM();
         b.teff = static_cast<float>(tde_.starTeff());
-        b.lightIntensity = 6.0f;
+        b.lightIntensity = 2.6f;
         b.seed = 5;
         b.info = "The star on its way in";
         bodies_.push_back(b);

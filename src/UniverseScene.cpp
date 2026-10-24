@@ -25,7 +25,7 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 // Surface brightness (L_sun / pc^2 / sr) -> HDR radiance. Calibrated so the Milky Way band seen
 // from the Sun has about the brightness of the painted backdrop's band.
-constexpr double kSurfaceToHdr = 0.01;
+constexpr double kSurfaceToHdr = 0.006;
 constexpr float kLimitingMag = 9.0f;
 constexpr size_t kMaxProcStars = 200000;
 constexpr int kSpriteGrid = 16;
@@ -405,10 +405,22 @@ void UniverseScene::rebuildMapping(double bhMassSolar) {
     massSolar_ = bhMassSolar;
     metersPerM_ = units::metersPerM(bhMassSolar);
     const glm::dvec3 s = glm::normalize(content_.blackHoleSpinAxis);
-    glm::dvec3 ref(1.0, 0.0, 0.0);
-    if (std::abs(glm::dot(ref, s)) > 0.9) ref = glm::dvec3(0.0, 0.0, 1.0);
-    const glm::dvec3 x = glm::normalize(ref - s * glm::dot(ref, s));
-    const glm::dvec3 z = glm::cross(x, s);
+    glm::dvec3 x, z;
+    const glm::dvec3 nodes = glm::cross(s, glm::normalize(content_.host.normal));
+    if (glm::length(nodes) > 0.05) {
+        // Renderer -Z (where the default views look) runs along the line where the accretion disk's
+        // plane meets the galaxy's, pointing towards the galactic centre when it can: the galaxy's band
+        // then crosses behind the black hole, tilted against the disk.
+        z = glm::normalize(nodes);
+        const glm::dvec3 toCentre = content_.host.center - content_.blackHolePos;
+        if (glm::dot(-z, toCentre) < 0.0) z = -z;
+        x = glm::cross(s, z);
+    } else {
+        glm::dvec3 ref(1.0, 0.0, 0.0);
+        if (std::abs(glm::dot(ref, s)) > 0.9) ref = glm::dvec3(0.0, 0.0, 1.0);
+        x = glm::normalize(ref - s * glm::dot(ref, s));
+        z = glm::cross(x, s);
+    }
     R_ = glm::transpose(glm::dmat3(x, s, z));   // rows: renderer axes in galactic coordinates
 }
 
@@ -759,7 +771,8 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
         b.pos = toRenderer(st.pos);
         b.radius = rM;
         b.teff = st.teff;
-        b.lightIntensity = 6.0f;
+        b.lightIntensity = 2.6f;   // bright enough to bloom, dim enough to keep the surface's detail
+        b.atmosphere = static_cast<float>(std::clamp(70.0 / std::sqrt(std::max(static_cast<double>(st.radiusSolar), 1e-3)), 5.0, 90.0));
         b.seed = static_cast<uint32_t>(best[k].i % 4096u);
         b.info = "star";
         bodies.push_back(b);

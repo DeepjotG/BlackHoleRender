@@ -115,7 +115,7 @@ GalaxyEval::GalaxyEval(const GalaxyModel& model) : m_(model) {
     }
     // Light per unit mass: young stars are far brighter than old ones; HII regions add nebular light;
     // the dense old bulge and bar are given extra weight so they glow above the disk as in photographs.
-    const double wOld = 1.0, wYoung = 10.0, wB = 1.6, wBar = 1.3, wHii = (ell || len) ? 0.0 : 1.2;
+    const double wOld = 1.0, wYoung = 10.0, wB = 1.6, wBar = 1.3, wHii = (ell || len) ? 0.0 : 0.9;
     const double S = fOld * wOld + fYoung * (wYoung + wHii) + fB * wB + fBar * wBar;
     const double lu = S > 0.0 ? L / S : 0.0;
 

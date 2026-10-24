@@ -205,13 +205,28 @@ Surface planetSurface(Body b, vec3 n) {
 // viewDir = direction of the incoming ray (camera -> hit).
 vec3 shadeBodySurface(Body b, vec3 n, vec3 viewDir) {
     if (b.relPos.w > 0.5) {
-        // Star: limb-darkened blackbody photosphere with granulation.
+        // Star: a convecting photosphere. Bright granules separated by darker lanes boil slowly (dwarfs
+        // have fine granulation, supergiants a few giant cells); Sun-like and cooler stars carry spots
+        // with a dark umbra and a penumbra; the limb is darker and redder (it shows cooler, higher layers).
         float mu = max(dot(n, -viewDir), 0.0);
-        float limb = 0.4 + 0.6 * pow(mu, 0.6);
         vec3 p = bodyLocal(b, n);
-        float gran = 0.92 + 0.16 * fbm3(p * 60.0, 3, 0.5, uint(b.look.y));
-        vec4 bb = blackbody(b.lightColor.a);
-        return bb.rgb * (b.light.w * limb * gran);
+        uint seed = uint(b.look.y);
+        float teff = b.lightColor.a;
+        float cool = clamp((7500.0 - teff) / 2500.0, 0.0, 1.0);
+        float freq = b.look.z > 0.0 ? b.look.z : 70.0;               // convection cells per radius
+        float tt = uTime * 0.02;
+        float g1 = fbm3(p * freq + vec3(0.0, tt, 0.0), 3, 0.55, seed);
+        float lanes = smoothstep(0.0, 0.35, abs(g1));                 // 0 in the dark lanes between cells
+        float gran = mix(1.0, mix(1.0, 0.78 + 0.3 * lanes, 0.35 + 0.65 * cool), lodFade(freq));   // fades out when unresolved
+        float sg = fbm3(p * 6.0 + vec3(tt * 0.2), 2, 0.5, seed + 7u);   // supergranulation, faculae
+        float spotN = fbm3(p * 3.5 + vec3(13.1), 3, 0.5, seed + 3u);
+        float spot = cool * smoothstep(0.40, 0.52, spotN);
+        float umbra = cool * smoothstep(0.50, 0.58, spotN);
+        float limb = 0.32 + 0.68 * pow(mu, 0.55);
+        float faculae = (1.0 - mu) * smoothstep(0.2, 0.5, sg) * 0.25 * cool;   // bright patches near the limb
+        float tLocal = teff * (0.84 + 0.16 * pow(mu, 0.4)) * (1.0 - 0.2 * spot - 0.2 * umbra) * (0.98 + 0.04 * sg);
+        float I = b.light.w * limb * gran * (1.0 - 0.5 * spot - 0.4 * umbra) * (1.0 + faculae);
+        return blackbody(tLocal).rgb * I;
     }
     Surface s = planetSurface(b, n);
     vec3 L = normalize(b.light.xyz);

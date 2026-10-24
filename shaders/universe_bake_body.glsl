@@ -128,7 +128,7 @@ void main() {
             // Stars close by are drawn individually, so their share of the diffuse light fades out
             // near the viewer.
             float unresolved = 1.0 - exp(-tm * 1000.0 / uResolvedPc);
-            vec3 src = max(light, vec3(0.0)) * unresolved + max(neb, vec3(0.0)) * (1.0 - exp(-tm / 0.25));
+            vec3 src = max(light, vec3(0.0)) * unresolved + max(neb, vec3(0.0)) * (1.0 - exp(-tm / 0.5));
             vec3 dT = dTau * kRedden;
             vec3 through = mix(1.0 - 0.5 * dT, (1.0 - exp(-dT)) / max(dT, vec3(1e-6)), step(vec3(1e-4), dT));
             L += exp(-tau * kRedden) * src * (dtPc * through);

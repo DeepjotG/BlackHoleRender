@@ -218,8 +218,14 @@ void buildInventedUniverse(UniverseContent& out, uint32_t seed) {
         const glm::dvec3 minor = glm::cross(host.normal, host.major);
         out.blackHolePos = host.center + R * (std::cos(theta) * host.major + std::sin(theta) * minor) +
                            host.normal * (r.normal() * 15.0 * kPc);
+        // The spin axis tilts at right angles to the direction of the galactic centre, so the line where
+        // the accretion disk's plane meets the galaxy's points at the centre: seen along it (the default
+        // views), the galaxy's band and bulge lie right behind the black hole, crossing the disk at the tilt.
         const double tilt = r.range(35.0, 70.0) * kPi / 180.0;
-        out.blackHoleSpinAxis = glm::normalize(std::cos(tilt) * host.normal + std::sin(tilt) * perpendicular(host.normal, r));
+        glm::dvec3 toCentre = host.center - out.blackHolePos;
+        toCentre = glm::normalize(toCentre - glm::dot(toCentre, host.normal) * host.normal);
+        const double side = r.uniform() < 0.5 ? 1.0 : -1.0;
+        out.blackHoleSpinAxis = glm::normalize(std::cos(tilt) * host.normal + side * std::sin(tilt) * glm::cross(toCentre, host.normal));
         out.suggestedMassSolar = 0.0;
         out.blackHoleName = "Gargantua";
     }
