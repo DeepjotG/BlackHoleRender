@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <filesystem>
+#include <random>
 
 #include "Log.h"
 #include "Orbits.h"
@@ -94,7 +95,112 @@ float atmosphereFor(universe::PlanetLook l) {
     }
 }
 
+uint64_t positionHash(const glm::dvec3& p) {
+    const auto q = [](double v) { return static_cast<uint64_t>(static_cast<int64_t>(std::floor(v / 1e9))); };
+    uint64_t h = q(p.x) * 0x9E3779B97F4A7C15ull;
+    h ^= q(p.y) * 0xC2B2AE3D27D4EB4Full + (h << 6) + (h >> 2);
+    h ^= q(p.z) * 0x165667B19E3779F9ull + (h << 6) + (h >> 2);
+    return h;
+}
+
+// Stable catalogue-style name for an unnamed star, from its position.
+std::string proceduralStarName(const glm::dvec3& p) {
+    static const char* prefixes[] = {"HX", "KV", "TQ", "ZR", "LN", "OP"};
+    const uint64_t h = positionHash(p);
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%s %04u-%03u", prefixes[h % 6], static_cast<unsigned>((h >> 8) % 10000u),
+                  static_cast<unsigned>((h >> 24) % 1000u));
+    return buf;
+}
+
 }  // namespace
+
+// Invented universe: a deterministic planetary system around a star you are close to. Orbits
+// follow Kepler's third law for the star's mass; each planet's type follows its equilibrium
+// temperature (lava worlds close in, temperate ocean and Earth-like worlds, gas giants beyond the
+// snow line, ice worlds far out).
+void UniverseScene::appendPlanetarySystem(const universe::StarRecord& st, const std::string& starName, double simSeconds,
+                                          std::vector<BodyDesc>& bodies) {
+    using universe::PlanetLook;
+    const double L = std::pow(10.0, (units::kSolarAbsMagV - st.absMag) / 2.5);
+    if (L > 2e4 || L < 1e-5) return;                      // blue supergiants and dark remnants: no planets
+    std::mt19937_64 rng(positionHash(st.pos) ^ 0xA5A5A5A55A5A5A5Aull);
+    std::uniform_real_distribution<double> U(0.0, 1.0);
+    const int count = static_cast<int>(U(rng) * 7.0);
+    if (count == 0) return;
+    const double mStar = std::clamp(std::pow(L, 1.0 / 3.5), 0.08, 30.0);
+    const double snowLine = 2.7 * std::sqrt(L);
+    // Orientation of the system's orbital plane.
+    std::normal_distribution<double> N(0.0, 1.0);
+    const glm::dvec3 n = glm::normalize(glm::dvec3(N(rng), N(rng), N(rng)) + glm::dvec3(1e-9));
+    const glm::dvec3 e1 = glm::normalize(glm::cross(n, std::abs(n.y) < 0.9 ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0)));
+    const glm::dvec3 e2 = glm::cross(n, e1);
+    const glm::dmat3 frame(e1, e2, n);                    // system "ecliptic" -> galactic
+    const double T = simSeconds / (36525.0 * units::kDay);
+    const double Tn = T + 1.0 / 36525.0;
+    double a = std::max(0.02, (0.25 + 0.4 * U(rng)) * std::sqrt(std::max(L, 0.01)));
+    for (int p = 0; p < count; ++p) {
+        if (p > 0) a *= 1.5 + 0.7 * U(rng);
+        universe::OrbitElements el;
+        el.aAU = a;
+        el.e = 0.12 * U(rng) * U(rng);
+        el.iDeg = 4.0 * (U(rng) - 0.5);
+        el.LDeg = 360.0 * U(rng);
+        el.varpiDeg = 360.0 * U(rng);
+        el.OmegaDeg = 360.0 * U(rng);
+        el.LRate = 36000.0 / (std::pow(a, 1.5) / std::sqrt(mStar));
+        const double teq = 278.0 * std::pow(L, 0.25) / std::sqrt(a);
+        BodyDesc b;
+        b.name = starName + " " + static_cast<char>('b' + p);
+        b.kind = BodyKind::Planet;
+        double radiusKm;
+        if (a > snowLine && U(rng) < 0.75) {
+            b.look = teq > 110.0 ? PlanetLook::GasGiantWarm : PlanetLook::GasGiantCold;
+            radiusKm = 22000.0 + 50000.0 * U(rng);
+            if (U(rng) < 0.35) {
+                b.ringInner = radiusKm * 1.25;
+                b.ringOuter = radiusKm * (1.9 + 0.6 * U(rng));
+            }
+        } else if (teq > 900.0) {
+            b.look = PlanetLook::Lava;
+            radiusKm = 3000.0 + 6000.0 * U(rng);
+        } else if (teq > 400.0) {
+            b.look = U(rng) < 0.5 ? PlanetLook::Rocky : PlanetLook::Desert;
+            radiusKm = 2500.0 + 6500.0 * U(rng);
+        } else if (teq > 240.0) {
+            b.look = U(rng) < 0.6 ? PlanetLook::Earthlike : PlanetLook::Ocean;
+            radiusKm = 4500.0 + 5500.0 * U(rng);
+        } else if (teq > 150.0) {
+            b.look = U(rng) < 0.5 ? PlanetLook::Desert : PlanetLook::Cloudy;
+            radiusKm = 3000.0 + 6000.0 * U(rng);
+        } else {
+            b.look = PlanetLook::Ice;
+            radiusKm = 2000.0 + 7000.0 * U(rng);
+        }
+        b.tint = glm::vec3(0.85f + 0.3f * static_cast<float>(U(rng)), 0.85f + 0.3f * static_cast<float>(U(rng)),
+                           0.85f + 0.3f * static_cast<float>(U(rng)));
+        b.atmosphere = atmosphereFor(b.look);
+        b.seed = static_cast<uint32_t>((positionHash(st.pos) >> 16) % 4096u) + static_cast<uint32_t>(p) * 97u;
+        const glm::dvec3 g = st.pos + frame * (orbits::position(el, T) * units::kAU);
+        const glm::dvec3 gn = st.pos + frame * (orbits::position(el, Tn) * units::kAU);
+        b.pos = toRenderer(g);
+        b.vel = (toRenderer(gn) - b.pos) / (units::kDay / units::secondsPerM(massSolar_));
+        b.radius = radiusKm * 1e3 / metersPerM_;
+        b.ringInner *= 1e3 / metersPerM_;
+        b.ringOuter *= 1e3 / metersPerM_;
+        b.axis = glm::vec3(glm::normalize(R_ * (frame * orbits::pole(el, T))));
+        b.rotation = static_cast<float>(std::fmod(simSeconds / (20000.0 + 40000.0 * p), 2.0 * kPi));
+        const glm::dvec3 toStar = st.pos - g;
+        const double dAU = glm::length(toStar) / units::kAU;
+        b.lightDir = glm::vec3(glm::normalize(R_ * toStar));
+        b.lightIntensity = static_cast<float>(std::clamp(1.6 * std::pow(std::sqrt(L) / std::max(dAU, 0.01), 0.7), 0.05, 4.0));
+        b.lightColor = blackbodyColor(st.teff);
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "planet of %s, %.2f AU out, about %.0f K", starName.c_str(), a, teq);
+        b.info = buf;
+        bodies.push_back(b);
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 bool UniverseScene::init() {
@@ -464,10 +570,25 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
         const bool isHole = glm::length(st.pos - content_.blackHolePos) < 1.0;
         if (isHole) continue;
         const bool named = st.name >= 0 && st.name < static_cast<int32_t>(content_.names.size());
-        const std::string starName = named ? content_.names[static_cast<size_t>(st.name)] : std::string("Star");
+        const std::string starName = named ? content_.names[static_cast<size_t>(st.name)] : proceduralStarName(st.pos);
         if (dM - rM < nearestSurfaceM_) {
             nearestSurfaceM_ = dM - rM;
-            nearestName_ = named ? starName : std::string("a star");
+            nearestName_ = starName;
+            nearestStarPos_ = toRenderer(st.pos);
+            nearestStarRadius_ = rM;
+            nearestStarName_ = starName;
+        }
+        // Invented universe: the stars you get close to have planets.
+        if (mode_ == 1 && k < 3 && best[k].d < 0.05 * units::kParsec) {
+            const size_t before = bodies.size();
+            appendPlanetarySystem(st, starName, simSeconds, bodies);
+            if (std::getenv("BHS_DEBUG_BODIES") && bodies.size() != before) {
+                static std::string logged;
+                if (logged != starName) {
+                    logged = starName;
+                    for (size_t q = before; q < bodies.size(); ++q) logInfo("planet {}: {}", bodies[q].name, bodies[q].info);
+                }
+            }
         }
         if (rM / dM < 2e-5) continue;   // not yet a visible disc
         BodyDesc b;

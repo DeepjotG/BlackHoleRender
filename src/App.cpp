@@ -578,6 +578,23 @@ bool App::goTo(const std::string& name, bool instant) {
     double dist = 30.0;
     glm::dvec3 fromDir(0.0);
     const BodyDesc* b = nullptr;
+    if (name == "nearest star") {
+        glm::dvec3 p;
+        double r;
+        std::string n;
+        if (!universe_.active() || !universe_.nearestStar(p, r, n)) return false;
+        const glm::dvec3 bearing = glm::normalize(camera_.position() - p + glm::dvec3(1e-30));
+        const double viewDist = r * 8.0;
+        followName_.clear();
+        flightTarget_.clear();
+        if (instant) {
+            camera_.setPose(p + bearing * viewDist, camera_.orientation());
+            camera_.lookAt(p);
+        } else {
+            camera_.flyToTarget(p, viewDist, bearing);
+        }
+        return true;
+    }
     if (name == "black hole" || name == "Gargantua" || name == "Sagittarius A*") {
         fromDir = glm::normalize(glm::dvec3(0.0, 0.1, 1.0));
     } else {

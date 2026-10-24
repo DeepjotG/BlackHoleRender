@@ -65,6 +65,14 @@ public:
     double nearestSurfaceM() const { return nearestSurfaceM_; }   // to stars / galaxy edges, M
     double julianDate(double simSeconds) const { return jd0_ + simSeconds / 86400.0; }
     std::string nearestName() const { return nearestName_; }
+    // Nearest star other than the black hole (renderer frame), for the "Nearest star" button.
+    bool nearestStar(glm::dvec3& pos, double& radius, std::string& name) const {
+        if (nearestStarRadius_ <= 0.0) return false;
+        pos = nearestStarPos_;
+        radius = nearestStarRadius_;
+        name = nearestStarName_;
+        return true;
+    }
     size_t starCount() const { return starCount_; }
     double lastGatherMs() const { return gatherMs_; }
     const std::string& status() const { return status_; }
@@ -76,6 +84,8 @@ private:
     void bakeFace(int face, const glm::dvec3& camGal);
     void buildGalaxyLists(const glm::dvec3& camGal);
     void buildTargets(double simSeconds);
+    void appendPlanetarySystem(const universe::StarRecord& st, const std::string& starName, double simSeconds,
+                               std::vector<BodyDesc>& bodies);
 
     bool active_ = false;
     int mode_ = 0;
@@ -99,6 +109,9 @@ private:
     ShaderProgram countProg_, scanProg_, scatterProg_;
     float fluxScale_ = 1.0f;
     double nearestSurfaceM_ = 1e300;
+    glm::dvec3 nearestStarPos_{0.0};
+    double nearestStarRadius_ = 0.0;
+    std::string nearestStarName_;
     std::string nearestName_;
 
     // diffuse sky

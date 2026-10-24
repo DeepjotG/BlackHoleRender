@@ -385,6 +385,8 @@ void Ui::draw(UiContext& c) {
         if (c.uniTargets && !c.uniTargets->empty()) {
             if (ImGui::Button("Surprise me")) *c.goToRequest = (*c.uniTargets)[static_cast<size_t>(std::rand()) % c.uniTargets->size()].name;
             ImGui::SameLine();
+            if (ImGui::Button("Nearest star")) *c.goToRequest = "nearest star";
+            ImGui::SameLine();
             ImGui::InputTextWithHint("##search", "search stars, galaxies, places", searchBuf_, sizeof searchBuf_);
             std::string needle(searchBuf_);
             std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
