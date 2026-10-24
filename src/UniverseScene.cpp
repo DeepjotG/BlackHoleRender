@@ -517,6 +517,10 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
         const double dPc = d / units::kParsec;
         const double flux = m.luminositySolar / (4.0 * kPi * dPc * dPc);   // L_sun / pc^2
         double peak = kSurfaceToHdr * flux / (0.25 * kPi * theta * theta + 1e-300);
+        // Deep-sky exposure, like a long-exposure photograph: distant galaxies are brightened (setting,
+        // 12x by default) so the sky fills with faint galaxies; 1x where galaxies hand over to the
+        // volumetric renderer, so nothing jumps.
+        peak *= 1.0 + (std::max(static_cast<double>(deepSky_), 1.0) - 1.0) * (1.0 - glm::smoothstep(0.004, 0.02, rb / d));
         if (theta < texel) {   // keep tiny galaxies one texel wide, conserving their flux
             peak *= (theta * theta) / (texel * texel);
             theta = texel;
@@ -708,6 +712,10 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
     const bool remap = s.bhMassSolar != massSolar_;
     if (remap) rebuildMapping(s.bhMassSolar);
     const glm::dvec3 camGal = toGalactic(camPosM);
+    if (s.deepSky != deepSky_) {   // re-bake with the new galaxy brightness
+        deepSky_ = s.deepSky;
+        bakeDirty_ = true;
+    }
 
     // ---- stars: explicit + procedural (+ the black hole itself as a point of light from afar)
     const double t0 = glfwGetTime();

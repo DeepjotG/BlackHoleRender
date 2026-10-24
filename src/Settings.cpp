@@ -88,7 +88,7 @@ const std::vector<Field>& fields() {
         BHS_TRACE(fovDeg), BHS_FIELD(mouseSensitivity), BHS_FIELD(invertY),
         BHS_TRACE(showShadowOverlay), BHS_FIELD(showUi),
         BHS_TRACE(universeMode), BHS_TRACE(universeSeed), BHS_TRACE(realPlacement), BHS_TRACE(bhMassSolar),
-        BHS_FIELD(timeWarp), BHS_TRACE(planetsEnabled), BHS_FIELD(showLabels), BHS_TRACE(gasBrightness), BHS_TRACE(gasOpacity),
+        BHS_FIELD(timeWarp), BHS_TRACE(planetsEnabled), BHS_FIELD(showLabels), BHS_TRACE(gasBrightness), BHS_TRACE(gasOpacity), BHS_TRACE(deepSky),
     };
     return f;
 }

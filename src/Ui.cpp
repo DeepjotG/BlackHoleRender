@@ -221,6 +221,10 @@ void Ui::draw(UiContext& c) {
             const char* places[] = {"Sagittarius A* (centre of the Milky Way)", "Near the Sun (fictional Gargantua)"};
             ImGui::Combo("Black hole", &s.realPlacement, places, 2);
         }
+        if (s.universeMode != 0) {
+            ImGui::SliderFloat("Deep-sky exposure", &s.deepSky, 1.0f, 30.0f, "%.0fx", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightens distant galaxies like a long-exposure photograph (1x = true brightness).");
+        }
         if (c.universeError && c.universeError[0]) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "%s", c.universeError);
         else ImGui::TextDisabled("%s", c.universeStatus);
         if (s.universeMode != 0 && c.uniStars) ImGui::TextDisabled("%zu stars in view range", c.uniStars);

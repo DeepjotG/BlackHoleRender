@@ -73,6 +73,7 @@ struct Settings {
     bool showLabels = true;         // on-screen markers for planets and other targets
     float gasBrightness = 1.0f;     // star-disruption gas: emission scale
     float gasOpacity = 1.0f;        // star-disruption gas: absorption scale
+    float deepSky = 12.0f;          // 3D universe: long-exposure boost for distant galaxies (1 = true brightness)
 
     // ---- Camera ----
     float fovDeg = 60.0f;

@@ -129,6 +129,7 @@ private:
     int bakeSteps() const { return 6 * std::max(1, bakeRes_ / kBakeChunkRows); }
     bool bakeOk_ = false;
     bool bakeDirty_ = true;
+    float deepSky_ = 12.0f;      // long-exposure boost for distant galaxies (Settings::deepSky)
     bool targetsBuilt_ = false;
     bool holeShown_ = false;     // the black hole is in the star list as a point of light
     bool starsChanged_ = true;   // star set changed since the last upload
