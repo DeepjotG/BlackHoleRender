@@ -9,6 +9,7 @@
 #include <cmath>
 #include <filesystem>
 #include <random>
+#include <thread>
 
 #include "Log.h"
 #include "Orbits.h"
@@ -442,12 +443,35 @@ glm::dvec3 UniverseScene::toGalactic(const glm::dvec3& r) const { return content
 glm::dvec3 UniverseScene::dirToRenderer(const glm::dvec3& d) const { return R_ * d; }
 
 void UniverseScene::uploadStars(const glm::dvec3& origin) {
+    const double tUp = glfwGetTime();
+    struct UploadTimer {
+        double t0;
+        size_t n;
+        ~UploadTimer() {
+            static const bool dbg = std::getenv("BHS_DEBUG_STARS") != nullptr;
+            if (dbg) logInfo("upload of {} stars: {:.2f} ms", n, (glfwGetTime() - t0) * 1000.0);
+        }
+    } timer{tUp, stars_.size()};
     starOrigin_ = origin;
-    std::vector<StarGpuIn> data;
-    data.reserve(stars_.size());
-    for (const universe::StarRecord& s : stars_) {
-        const glm::dvec3 rel = (s.pos - origin) / units::kParsec;
-        data.push_back({glm::vec4(glm::vec3(rel), s.absMag), glm::vec4(blackbodyColor(s.teff), s.radiusSolar)});
+    blackbodyColor(5772.0);   // builds the colour table before the workers read it
+    // Conversion split across threads: ~200k stars cost 5-7 ms on one core, a hitch while flying.
+    std::vector<StarGpuIn> data(stars_.size());
+    const auto convert = [&](size_t a, size_t b) {
+        for (size_t i = a; i < b; ++i) {
+            const universe::StarRecord& st = stars_[i];
+            const glm::dvec3 rel = (st.pos - origin) / units::kParsec;
+            data[i] = {glm::vec4(glm::vec3(rel), st.absMag), glm::vec4(blackbodyColor(st.teff), st.radiusSolar)};
+        }
+    };
+    const size_t total = data.size();
+    const size_t workers = total > 20000 ? std::min<size_t>(8, std::max(1u, std::thread::hardware_concurrency() / 2)) : 1;
+    if (workers <= 1) {
+        convert(0, total);
+    } else {
+        std::vector<std::thread> pool;
+        for (size_t w = 1; w < workers; ++w) pool.emplace_back(convert, total * w / workers, total * (w + 1) / workers);
+        convert(0, total / workers);
+        for (std::thread& t : pool) t.join();
     }
     starCount_ = data.size();
     const size_t n = std::max<size_t>(data.size(), 1);
@@ -459,8 +483,14 @@ void UniverseScene::uploadStars(const glm::dvec3& origin) {
         glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(starCapacity_ * sizeof(StarGpuOut)), nullptr, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, starBuf_);
     }
+    // Orphan the old storage: the previous frames' projection may still read it, and writing into it
+    // in place would make the driver wait for the GPU.
+    const double tConv = glfwGetTime();
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(starCapacity_ * sizeof(StarGpuIn)), nullptr, GL_DYNAMIC_DRAW);
     if (!data.empty()) glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(data.size() * sizeof(StarGpuIn)), data.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    static const bool dbg = std::getenv("BHS_DEBUG_STARS") != nullptr;
+    if (dbg) logInfo("  (conversion {:.2f} ms, GPU upload {:.2f} ms)", (tConv - tUp) * 1000.0, (glfwGetTime() - tConv) * 1000.0);
 }
 
 void UniverseScene::projectStars(const glm::dvec3& camGal, float limitingMag) {
