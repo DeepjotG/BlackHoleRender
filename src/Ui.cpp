@@ -161,12 +161,24 @@ void Ui::drawMarkers(UiContext& c) {
         out = ImVec2((sx * 0.5f + 0.5f) * ds.x, (0.5f - sy * 0.5f) * ds.y);
         return out.x > -50.0f && out.y > -50.0f && out.x < ds.x + 50.0f && out.y < ds.y + 50.0f;
     };
+    // Labels never overlap: one that would cover an earlier one (planets first, then the black hole,
+    // then universe targets in priority order) is skipped.
+    std::vector<ImVec4> taken;   // x0, y0, x1, y1
+    auto claim = [&](const ImVec2& p0, const ImVec2& p1) {
+        for (const ImVec4& r : taken)
+            if (p0.x < r.z && p1.x > r.x && p0.y < r.w && p1.y > r.y) return false;
+        taken.push_back(ImVec4(p0.x, p0.y, p1.x, p1.y));
+        return true;
+    };
     auto label = [&](const ImVec2& at, float radiusPx, const std::string& name, double distM, ImU32 col) {
         const float rr = std::max(radiusPx * 1.25f, 7.0f);
-        dl->AddCircle(at, rr, col, 32, 1.5f);
         char buf[160];
         std::snprintf(buf, sizeof buf, "%s  %s", name.c_str(), units::formatDistance(distM * mPerM).c_str());
-        dl->AddText(ImVec2(at.x + rr + 4.0f, at.y - 7.0f), col, buf);
+        const ImVec2 textAt(at.x + rr + 4.0f, at.y - 7.0f);
+        const ImVec2 size = ImGui::CalcTextSize(buf);
+        if (!claim(ImVec2(at.x - rr - 2.0f, at.y - std::max(rr, 8.0f)), ImVec2(textAt.x + size.x + 4.0f, at.y + std::max(rr, 8.0f)))) return;
+        dl->AddCircle(at, rr, col, 32, 1.5f);
+        dl->AddText(textAt, col, buf);
     };
     if (c.bodies) {
         for (const BodyDesc& b : *c.bodies) {
@@ -178,7 +190,9 @@ void Ui::drawMarkers(UiContext& c) {
             if (rpx > 24.0f) {                  // clearly visible: just a name beside its limb
                 char buf[160];
                 std::snprintf(buf, sizeof buf, "%s  %s", b.name.c_str(), units::formatDistance(std::max(dist - b.radius, 0.0) * mPerM).c_str());
-                dl->AddText(ImVec2(at.x + rpx * 0.75f + 6.0f, at.y - rpx * 0.75f), IM_COL32(150, 220, 255, 200), buf);
+                const ImVec2 textAt(at.x + rpx * 0.75f + 6.0f, at.y - rpx * 0.75f);
+                const ImVec2 size = ImGui::CalcTextSize(buf);
+                if (claim(textAt, ImVec2(textAt.x + size.x, textAt.y + size.y))) dl->AddText(textAt, IM_COL32(150, 220, 255, 200), buf);
                 continue;
             }
             label(at, rpx, b.name, std::max(dist - b.radius, 0.0), IM_COL32(150, 220, 255, 220));
@@ -192,6 +206,7 @@ void Ui::drawMarkers(UiContext& c) {
     if (c.uniTargets && s.universeMode != 0) {
         int drawn = 0;
         for (const UniverseTarget& t : *c.uniTargets) {
+            if (!t.skyLabel) continue;
             ImVec2 at;
             double dist;
             if (!project(t.pos, at, dist)) continue;

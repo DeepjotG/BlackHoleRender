@@ -745,6 +745,7 @@ void UniverseScene::buildTargets(double simSeconds) {
         t.radius = 0.55 * content_.host.boundingRadiusPc() * units::kParsec / metersPerM_;
         t.kind = 1;
         t.info = "the whole galaxy around the black hole";
+        t.skyLabel = false;
         t.axis = glm::normalize(R_ * content_.host.normal);
         targets_.push_back(t);
     }

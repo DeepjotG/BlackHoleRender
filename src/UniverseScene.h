@@ -27,6 +27,7 @@ struct UniverseTarget {
     std::string info;
     float absMag = 0.0f;      // stars: absolute visual magnitude
     glm::dvec3 axis{0.0};     // galaxies: disk normal (renderer frame), so visits arrive at a flattering angle
+    bool skyLabel = true;     // false: a viewpoint for the Travel list, not an object to label in the sky
 };
 
 class UniverseScene {
