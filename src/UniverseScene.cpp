@@ -343,6 +343,14 @@ bool UniverseScene::init() {
     for (int r = bakeRes_; r > 1; r >>= 1) ++levels;
     glTexStorage2D(GL_TEXTURE_CUBE_MAP, levels, GL_RGBA16F, bakeRes_, bakeRes_);
     for (int l = 0; l < levels; ++l) glClearTexImage(cube_, l, GL_RGBA, GL_FLOAT, nullptr);
+    glGenTextures(2, tauCube_);
+    for (GLuint t : tauCube_) {
+        glBindTexture(GL_TEXTURE_CUBE_MAP, t);
+        glTexStorage2D(GL_TEXTURE_CUBE_MAP, 1, GL_RGBA16F, bakeRes_, bakeRes_);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glClearTexImage(t, 0, GL_RGBA, GL_FLOAT, nullptr);
+    }
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -360,6 +368,8 @@ void UniverseScene::shutdown() {
         *b = 0;
     }
     if (cube_) glDeleteTextures(1, &cube_);
+    if (tauCube_[0]) glDeleteTextures(2, tauCube_);
+    tauCube_[0] = tauCube_[1] = 0;
     cube_ = 0;
 }
 
@@ -466,6 +476,10 @@ void UniverseScene::projectStars(const glm::dvec3& camGal, float limitingMag) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, countBuf_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, offsetBuf_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, sortedBuf_);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tauCube_[0]);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, tauCube_[1]);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_CUBE_MAP, cube_);
     for (ShaderProgram* p : {&countProg_, &scanProg_, &scatterProg_}) {
@@ -476,6 +490,8 @@ void UniverseScene::projectStars(const glm::dvec3& camGal, float limitingMag) {
         p->set("uLimMag", limitingMag);
         p->set("uT", kTileGrid);
         p->set("uDust", 0);
+        p->set("uTauA", 1);
+        p->set("uTauB", 2);
         p->set("uHaveDust", bakeOk_ ? 1 : 0);
         if (p == &scanProg_) glDispatchCompute(1, 1, 1);
         else if (n > 0) glDispatchCompute(static_cast<GLuint>((n + 255) / 256), 1, 1);
@@ -619,6 +635,8 @@ void UniverseScene::bakeChunk(int step) {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, spriteTileBuf_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, spriteIndexBuf_);
     glBindImageTexture(0, cube_, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glBindImageTexture(1, tauCube_[0], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glBindImageTexture(2, tauCube_[1], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
     static const bool debugBake = std::getenv("BHS_DEBUG_BAKE") != nullptr;
     const double tb = debugBake ? (glFinish(), glfwGetTime()) : 0.0;
     glDispatchCompute(static_cast<GLuint>(bakeRes_ / 16), static_cast<GLuint>(rows / 16), 1);

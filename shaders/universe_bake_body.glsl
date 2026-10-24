@@ -9,6 +9,11 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(rgba16f, binding = 0) uniform writeonly imageCube uOut;
+// V-band optical depth from the viewpoint out to 30, 100, 300, 1000 pc (A) and 3, 10 kpc (B): stars
+// are dimmed by exactly the dust in front of them (universe_stars.comp interpolates in log distance).
+layout(rgba16f, binding = 1) uniform writeonly imageCube uTauA;
+layout(rgba16f, binding = 2) uniform writeonly imageCube uTauB;
+const float kTauNodeKpc[6] = float[](0.03, 0.1, 0.3, 1.0, 3.0, 10.0);
 
 uniform int uRes;
 uniform int uFace;
@@ -85,6 +90,8 @@ void main() {
     const vec3 kRedden = vec3(0.8, 1.0, 1.25);
     vec3 L = vec3(0.0);
     float tau = 0.0;   // V band
+    float tauAt[6] = float[](0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    int nextNode = 0;
     float texelAngle = 2.0 / float(uRes);
     float jitter = hash12(vec2(px) + vec2(float(uFace) * 1031.0, 17.0));
     for (int gi = 0; gi < uNearCount && tau < 30.0; ++gi) {
@@ -107,6 +114,7 @@ void main() {
         float exitR = 12.0 * nearGal[gi].data[6].w;             // 12 bulge scale radii
         if (nearGal[gi].data[14].z > 0.0) exitR = max(exitR, 1.4 / nearGal[gi].data[14].z);   // and the bar
         float t = max(t0, 0.02);   // nothing to see inside the viewer's dust-free bubble
+        while (nextNode < 6 && kTauNodeKpc[nextNode] <= t) tauAt[nextNode++] = tau;   // before this galaxy
         for (int k = 0; k < 170 && t < t1; ++k) {
             vec3 dc = dg * t - c;
             float yc = dot(dc, nrm);
@@ -132,6 +140,10 @@ void main() {
             vec3 dT = dTau * kRedden;
             vec3 through = mix(1.0 - 0.5 * dT, (1.0 - exp(-dT)) / max(dT, vec3(1e-6)), step(vec3(1e-4), dT));
             L += exp(-tau * kRedden) * src * (dtPc * through);
+            while (nextNode < 6 && kTauNodeKpc[nextNode] <= t + st) {
+                tauAt[nextNode] = tau + dTau * clamp((kTauNodeKpc[nextNode] - t) / st, 0.0, 1.0);
+                ++nextNode;
+            }
             tau += dTau;
             t += st;
             if (tau > 30.0) break;
@@ -152,4 +164,7 @@ void main() {
 
     if (any(isnan(col)) || any(isinf(col))) col = vec3(0.0);
     imageStore(uOut, ivec3(px, uFace), vec4(max(col, vec3(0.0)), min(tau, 60000.0)));
+    while (nextNode < 6) tauAt[nextNode++] = tau;   // beyond every galaxy
+    imageStore(uTauA, ivec3(px, uFace), min(vec4(tauAt[0], tauAt[1], tauAt[2], tauAt[3]), vec4(60000.0)));
+    imageStore(uTauB, ivec3(px, uFace), min(vec4(tauAt[4], tauAt[5], 0.0, 0.0), vec4(60000.0)));
 }

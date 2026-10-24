@@ -120,6 +120,7 @@ private:
 
     // diffuse sky
     GLuint cube_ = 0;
+    GLuint tauCube_[2] = {0, 0};   // dust optical depth at fixed distances (see universe_bake_body.glsl)
     ShaderProgram bakeProg_;
     GLuint nearGalBuf_ = 0, spriteBuf_ = 0, spriteTileBuf_ = 0, spriteIndexBuf_ = 0;
     int nearGalCount_ = 0;

@@ -24,9 +24,13 @@ namespace bhs::universe {
 enum class Mode : int32_t { Backdrop = 0, Invented = 1, Real = 2 };
 enum class BlackHolePlacement : int32_t { GalacticCenter = 0, NearSun = 1 };
 
+// Interstellar extinction: StarRecord::absMag is intrinsic (dust-free) with respect to
+// UniverseContent::host's dust; catalogue providers remove the host column between the observer and
+// each star. The renderer dims every star by the host's dust between the camera and the star (the sky
+// bake records the optical depth at fixed distances along every direction).
 struct StarRecord {
     glm::dvec3 pos{0.0};        // meters, galactic frame
-    float absMag = 4.83f;       // absolute visual magnitude
+    float absMag = 4.83f;       // absolute visual magnitude, intrinsic (see above)
     float teff = 5772.0f;       // effective temperature, K
     float radiusSolar = 1.0f;   // photosphere radius in solar radii
     int32_t name = -1;          // index into UniverseContent::names, -1 if unnamed
@@ -85,7 +89,7 @@ struct UniverseContent {
     // the catalogue already contains (brighter than `catalogLimitAbsMag` at that distance).
     glm::dvec3 catalogCenter{0.0};
     double catalogRadiusPc = 0.0;
-    float catalogLimitAppMag = 0.0f;            // apparent magnitude completeness seen from catalogCenter
+    float catalogLimitAppMag = 0.0f;            // apparent (observed, dimmed) V completeness seen from catalogCenter
 };
 
 // Real universe from the files in `assetDir` (see tools/fetch_real_catalogs.py and assets/real/).
