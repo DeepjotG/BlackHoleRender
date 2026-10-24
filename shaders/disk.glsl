@@ -88,7 +88,8 @@ void volumetricDiskStep(vec3 p, float r, float ds, float bAxis, float rcam, inou
     float T = uDiskPeakTemp * diskTempProfile(r) * mix(1.0, 0.85 + 0.3 * emit, 0.5);
     float g = mix(1.0, redshiftFactor(r, bAxis, rcam), uDopplerStrength);
     vec4 bb = blackbody(T * g);
-    vec3 source = diskTint(bb.rgb) * (bb.a * uDiskBrightness * emit);   // radiance of an optically thick column
+    float inward = pow(uDiskInner / max(r, uDiskInner), 0.6);            // hotter, brighter towards the ISCO
+    vec3 source = diskTint(bb.rgb) * (bb.a * uDiskBrightness * emit * inward);   // radiance of an optically thick column
     float absorb = dens * uDiskOpacity;
     float a = 1.0 - exp(-absorb * ds);
     color += transmittance * source * a;

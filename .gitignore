@@ -3,6 +3,7 @@ build-*/
 .cache/
 *.png
 !assets/*.png
+!docs/*.png
 settings.ini
 imgui.ini
 compile_commands.json

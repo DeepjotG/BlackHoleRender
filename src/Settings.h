@@ -35,7 +35,7 @@ struct Settings {
     float diskDensity = 1.0f;
     float diskOpacity = 2.0f;
     float diskPeakTemp = 6000.0f;   // Kelvin at the hottest ring
-    float diskBrightness = 4.5f;
+    float diskBrightness = 5.5f;
     float diskNoiseScale = 1.0f;
     float diskNoiseStrength = 0.85f;
     float diskSpeed = 1.0f;         // disk time multiplier
