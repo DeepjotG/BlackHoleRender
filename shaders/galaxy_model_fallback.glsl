@@ -36,4 +36,10 @@ void galaxySample(in GalaxyGpu g, vec3 pKpc, out vec3 emissivity, out float exti
     float hd = max(g.data[6].y, 1e-4);
     extinction = g.data[6].x * exp(1.0 - R / hR - abs(y) / hd) * armMod;
 }
+vec3 galaxyNormal(in GalaxyGpu g) { return g.data[1].xyz; }
+float galaxyThinKpc(in GalaxyGpu g) { return max(g.data[6].y, 1e-4); }
+void galaxySampleLod(in GalaxyGpu g, vec3 pKpc, float lodKpc, out vec3 starLight, out vec3 nebula, out float tau) {
+    galaxySample(g, pKpc, starLight, tau);
+    nebula = vec3(0.0);
+}
 #endif

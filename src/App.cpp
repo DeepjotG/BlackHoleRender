@@ -250,6 +250,7 @@ int App::run(const Options& opt) {
     if (opt.warp >= 0.0) settings_.timeWarp = opt.warp;
     if (opt.universe >= 0) settings_.universeMode = opt.universe;
     if (opt.universeSeed >= 0) settings_.universeSeed = static_cast<uint32_t>(opt.universeSeed);
+    if (opt.fovDeg > 0.0) settings_.fovDeg = static_cast<float>(opt.fovDeg);
     if (opt.placement >= 0) settings_.realPlacement = opt.placement;
     debugView_ = opt.debugView;
     simTime_ = opt.startTime;
@@ -614,8 +615,17 @@ bool App::goTo(const std::string& name, bool instant) {
             for (const UniverseTarget& t : universe_.targets()) {
                 if (t.name != name) continue;
                 const double viewDist = t.kind == 0 ? t.radius * 8.0 : (t.kind == 1 ? t.radius * 2.2 : t.radius * 2.0);
-                const glm::dvec3 bearing = glm::length(camera_.position() - t.pos) > 0.0 ? glm::normalize(camera_.position() - t.pos)
-                                                                                          : glm::dvec3(0, 0, 1);
+                glm::dvec3 bearing = glm::length(camera_.position() - t.pos) > 0.0 ? glm::normalize(camera_.position() - t.pos)
+                                                                                    : glm::dvec3(0, 0, 1);
+                if (glm::length(t.axis) > 0.5) {
+                    // Arrive above the disk (on the side we come from) so the spiral structure shows.
+                    static const double elevDeg = std::getenv("BHS_VIEW_ELEV") ? std::atof(std::getenv("BHS_VIEW_ELEV")) : 38.0;
+                    const double up = glm::dot(bearing, t.axis) >= 0.0 ? 1.0 : -1.0;
+                    glm::dvec3 side = bearing - glm::dot(bearing, t.axis) * t.axis;
+                    if (glm::length(side) < 1e-6) side = glm::cross(t.axis, std::abs(t.axis.y) < 0.9 ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0));
+                    const double e = glm::radians(elevDeg);
+                    bearing = glm::normalize(std::cos(e) * glm::normalize(side) + std::sin(e) * up * t.axis);
+                }
                 if (instant) {
                     camera_.setPose(t.pos + bearing * viewDist, camera_.orientation());
                     camera_.lookAt(t.pos);

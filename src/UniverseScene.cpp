@@ -3,6 +3,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cmath>
@@ -13,6 +14,9 @@
 #include "Orbits.h"
 #include "Settings.h"
 #include "Units.h"
+#if !BHS_GALAXY_MODEL_STUB
+#include "universe/GalaxyModel_internal.h"
+#endif
 
 namespace bhs {
 
@@ -21,9 +25,9 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 // Surface brightness (L_sun / pc^2 / sr) -> HDR radiance. Calibrated so the Milky Way band seen
 // from the Sun has about the brightness of the painted backdrop's band.
-constexpr double kSurfaceToHdr = 0.004;
+constexpr double kSurfaceToHdr = 0.01;
 constexpr float kLimitingMag = 9.0f;
-constexpr size_t kMaxProcStars = 250000;
+constexpr size_t kMaxProcStars = 200000;
 constexpr int kSpriteGrid = 16;
 constexpr int kMaxNearGalaxies = 16;
 
@@ -203,6 +207,103 @@ void UniverseScene::appendPlanetarySystem(const universe::StarRecord& st, const 
     }
 }
 
+// CPU/GPU agreement of the galaxy model (BHS_GALAXY_SELFTEST=1): random points in five galaxies of
+// every type, at several levels of detail, evaluated by galaxy_model.glsl and by GalaxyEval.
+static void galaxySelfTest() {
+#if !BHS_GALAXY_MODEL_STUB
+    using namespace universe;
+    const double kpc = 1e3 * units::kParsec;
+    std::mt19937_64 rng(42);
+    std::uniform_real_distribution<double> U(-1.0, 1.0);
+    std::vector<GalaxyModel> models(5);
+    for (int i = 0; i < 5; ++i) {
+        GalaxyModel& m = models[static_cast<size_t>(i)];
+        m.type = static_cast<GalaxyType>(i);
+        m.seed = 100u + static_cast<uint32_t>(i) * 7919u;
+        m.center = glm::dvec3(U(rng), U(rng), U(rng)) * (50.0 * kpc);
+        m.normal = glm::normalize(glm::dvec3(U(rng), U(rng), U(rng)));
+        m.major = glm::normalize(glm::cross(m.normal, glm::dvec3(0.3, 0.8, 0.5)));
+        m.dustExtinctionPerKpc = i == 3 ? 0.0 : 3.0;
+        if (i == 1) m.barLengthPc = 3500.0;
+        if (i == 4) m.armContrast = 1.3;
+    }
+    const glm::dvec3 view = glm::dvec3(1234.0, -567.0, 89.0) * units::kParsec;
+    std::vector<GalaxyGpu> gpu;
+    for (const GalaxyModel& m : models) gpu.push_back(packGalaxyGpu(m, view));
+    struct Query {
+        glm::vec4 pLod;
+        glm::uvec4 galaxy;
+    };
+    const int n = 4096;
+    std::vector<Query> q(n);
+    const float lods[] = {0.0f, 0.03f, 0.3f, 2.0f};
+    for (int i = 0; i < n; ++i) {
+        const size_t g = static_cast<size_t>(i % 5);
+        const double r = models[g].boundingRadiusPc() * units::kParsec * std::pow(10.0, -2.5 * (0.5 + 0.5 * U(rng)));
+        glm::dvec3 d = glm::normalize(glm::dvec3(U(rng), U(rng), U(rng)));
+        d -= 0.8 * glm::dot(d, models[g].normal) * models[g].normal;   // favour the disk
+        const glm::dvec3 p = models[g].center + d * r - view;
+        q[static_cast<size_t>(i)] = {glm::vec4(glm::vec3(p / kpc), lods[i % 4]), glm::uvec4(static_cast<unsigned>(g), 0, 0, 0)};
+    }
+    ShaderProgram prog;
+    if (!prog.loadCompute("galaxy_selftest.comp")) {
+        logError("galaxy model self-test: shader failed to compile");
+        return;
+    }
+    GLuint buf[3];
+    glGenBuffers(3, buf);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf[0]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(gpu.size() * sizeof(GalaxyGpu)), gpu.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf[1]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(q.size() * sizeof(Query)), q.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, buf[2]);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(n * 2 * sizeof(glm::vec4)), nullptr, GL_STATIC_READ);
+    for (GLuint i = 0; i < 3; ++i) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, buf[i]);
+    prog.use();
+    prog.set("uCount", n);
+    glDispatchCompute(static_cast<GLuint>((n + 63) / 64), 1, 1);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    std::vector<glm::vec4> res(static_cast<size_t>(n) * 2);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(res.size() * sizeof(glm::vec4)), res.data());
+    glDeleteBuffers(3, buf);
+    glUseProgram(0);
+    // Relative differences, with a floor of 1e-4 of each quantity's largest value (near-zero values
+    // at the edge of an HII knot or a dust cloud are not meaningful relative to themselves).
+    std::vector<std::array<double, 6>> vals(static_cast<size_t>(n));
+    double peak[3] = {0.0, 0.0, 0.0};
+    for (int i = 0; i < n; ++i) {
+        const Query& qi = q[static_cast<size_t>(i)];
+        const detail::GalaxyEval ev(models[qi.galaxy.x]);
+        detail::GalaxySample s;
+        ev.sample(view + glm::dvec3(glm::vec3(qi.pLod)) * kpc, s, qi.pLod.w * 1000.0);
+        const auto lum = [](const glm::dvec3& c) { return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z; };
+        const double cpu[3] = {lum(s.starLight), lum(s.nebula), s.tau};
+        const glm::vec4 a = res[2 * static_cast<size_t>(i)], b = res[2 * static_cast<size_t>(i) + 1];
+        const double gpuv[3] = {lum(glm::dvec3(a)), lum(glm::dvec3(b)), static_cast<double>(a.w)};
+        for (int k = 0; k < 3; ++k) {
+            vals[static_cast<size_t>(i)][static_cast<size_t>(k)] = cpu[k];
+            vals[static_cast<size_t>(i)][static_cast<size_t>(k + 3)] = gpuv[k];
+            peak[k] = std::max(peak[k], std::abs(cpu[k]));
+        }
+    }
+    double worst[3] = {0.0, 0.0, 0.0};
+    int bad = 0;
+    for (const auto& v : vals)
+        for (int k = 0; k < 3; ++k) {
+            const double scale = std::max({std::abs(v[static_cast<size_t>(k)]), std::abs(v[static_cast<size_t>(k + 3)]), 1e-4 * peak[k], 1e-12});
+            const double rel = std::abs(v[static_cast<size_t>(k)] - v[static_cast<size_t>(k + 3)]) / scale;
+            worst[k] = std::max(worst[k], rel);
+            if (rel > 0.02 || !std::isfinite(v[static_cast<size_t>(k + 3)])) ++bad;
+        }
+    if (bad)
+        logWarn("galaxy model self-test: {} points, worst relative difference light {:.2e}, nebulae {:.2e}, dust {:.2e}, {} above 2%", n,
+                worst[0], worst[1], worst[2], bad);
+    else
+        logInfo("galaxy model self-test: {} points, worst relative difference light {:.2e}, nebulae {:.2e}, dust {:.2e}", n, worst[0],
+                worst[1], worst[2]);
+#endif
+}
+
 // ---------------------------------------------------------------------------------------------
 bool UniverseScene::init() {
     jd0_ = orbits::julianDateNow();
@@ -212,9 +313,11 @@ bool UniverseScene::init() {
         p.setDefines({"BHS_PASS " + std::to_string(pass)});
         ok = p.loadCompute("universe_stars.comp") && ok;
     }
-    const bool haveModel = std::filesystem::exists(ShaderProgram::shaderDir() + "/galaxy_model.glsl");
+    // The bake shader must match the CPU galaxy model that packs its constants.
+    const bool haveModel = !BHS_GALAXY_MODEL_STUB && std::filesystem::exists(ShaderProgram::shaderDir() + "/galaxy_model.glsl");
     bakeOk_ = bakeProg_.loadCompute(haveModel ? "universe_bake.comp" : "universe_bake_fallback.comp");
-    if (!haveModel) logWarn("galaxy_model.glsl not present yet: using the fallback galaxy model for the sky");
+    if (!haveModel) logWarn("built with the placeholder galaxy model: using the fallback galaxy model for the sky");
+    if (haveModel && std::getenv("BHS_GALAXY_SELFTEST")) galaxySelfTest();
     glGenBuffers(1, &starBuf_);
     glGenBuffers(1, &sortedBuf_);
     glGenBuffers(1, &countBuf_);
@@ -236,8 +339,9 @@ bool UniverseScene::init() {
     glGenTextures(1, &cube_);
     glBindTexture(GL_TEXTURE_CUBE_MAP, cube_);
     int levels = 1;
-    for (int r = kBakeRes; r > 1; r >>= 1) ++levels;
-    glTexStorage2D(GL_TEXTURE_CUBE_MAP, levels, GL_RGBA16F, kBakeRes, kBakeRes);
+    if (const char* e = std::getenv("BHS_BAKE_RES")) bakeRes_ = std::clamp(std::atoi(e) / 256 * 256, 256, 2048);
+    for (int r = bakeRes_; r > 1; r >>= 1) ++levels;
+    glTexStorage2D(GL_TEXTURE_CUBE_MAP, levels, GL_RGBA16F, bakeRes_, bakeRes_);
     for (int l = 0; l < levels; ++l) glClearTexImage(cube_, l, GL_RGBA, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -286,7 +390,8 @@ bool UniverseScene::configure(int mode, uint32_t seed, int placement, const std:
     massSolar_ = 0.0;              // forces a mapping rebuild on the next update
     lastProjectCam_ = glm::dvec3(1e300);
     bakeCam_ = glm::dvec3(1e300);
-    bakeFace_ = 6;
+    bakeStep_ = 1 << 30;
+    galDistAt_ = glm::dvec3(1e300);
     active_ = true;
     char buf[256];
     std::snprintf(buf, sizeof buf, "%s universe: %zu catalogue stars, %zu galaxies (built in %.0f ms)", mode == 2 ? "Real" : "Invented",
@@ -372,19 +477,25 @@ void UniverseScene::projectStars(const glm::dvec3& camGal, float limitingMag) {
 }
 
 void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
-    std::vector<universe::GalaxyGpu> nearGpu;
-    nearGpu.push_back(universe::packGalaxyGpu(content_.host, camGal));
+    // Galaxies that cover more than ~1 degree are ray-marched as volumes: the host plus the 15 largest
+    // on the sky, marched front to back so nearer dust dims farther light.
+    struct NearGalaxy {
+        double angular, key;
+        const universe::GalaxyModel* model;
+    };
+    std::vector<NearGalaxy> near;
+    near.push_back({1e9, glm::length(content_.host.center - camGal) - content_.host.boundingRadiusPc() * units::kParsec, &content_.host});
     std::vector<SpriteGpu> sprites;
     sprites.reserve(content_.galaxies.size());
-    const double texel = 1.5708 / kBakeRes * 2.0;
+    const double texel = 1.5708 / bakeRes_ * 2.0;
     for (const universe::GalaxyRecord& gr : content_.galaxies) {
         const universe::GalaxyModel& m = gr.model;
         const glm::dvec3 rel = m.center - camGal;
         const double d = glm::length(rel);
         const double rb = m.boundingRadiusPc() * units::kParsec;
         if (d < 1.0) continue;
-        if (rb / d > 0.07 && static_cast<int>(nearGpu.size()) < kMaxNearGalaxies) {
-            nearGpu.push_back(universe::packGalaxyGpu(m, camGal));
+        if (rb / d > 0.02) {
+            near.push_back({rb / d, d - rb, &m});
             continue;
         }
         const glm::dvec3 dirG = rel / d;
@@ -414,6 +525,14 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
                              static_cast<float>(m.seed % 997u));
         sprites.push_back(s);
     }
+    if (near.size() > static_cast<size_t>(kMaxNearGalaxies)) {
+        std::partial_sort(near.begin(), near.begin() + kMaxNearGalaxies, near.end(),
+                          [](const NearGalaxy& a, const NearGalaxy& b) { return a.angular > b.angular; });
+        near.resize(kMaxNearGalaxies);   // the dropped ones are still too big for sprites: skip them
+    }
+    std::sort(near.begin(), near.end(), [](const NearGalaxy& a, const NearGalaxy& b) { return a.key < b.key; });
+    std::vector<universe::GalaxyGpu> nearGpu;
+    for (const NearGalaxy& n : near) nearGpu.push_back(universe::packGalaxyGpu(*n.model, camGal));
     nearGalCount_ = static_cast<int>(nearGpu.size());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, nearGalBuf_);
     glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(nearGpu.size() * sizeof(universe::GalaxyGpu)), nearGpu.data(), GL_DYNAMIC_DRAW);
@@ -461,29 +580,53 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
-void UniverseScene::bakeFace(int face, const glm::dvec3&) {
+void UniverseScene::bakeChunk(int step) {
     if (!bakeOk_) return;
+    const int chunks = std::max(1, bakeRes_ / kBakeChunkRows);
+    const int face = step / chunks, rows = bakeRes_ / chunks, row0 = (step % chunks) * rows;
     bakeProg_.use();
-    bakeProg_.set("uRes", kBakeRes);
+    bakeProg_.set("uRes", bakeRes_);
     bakeProg_.set("uFace", face);
+    bakeProg_.set("uRowOffset", row0);
     bakeProg_.set("uRt", glm::mat3(glm::transpose(R_)));
     bakeProg_.set("uNearCount", nearGalCount_);
     bakeProg_.set("uScale", static_cast<float>(kSurfaceToHdr / (4.0 * kPi)));
-    bakeProg_.set("uResolvedPc", 1500.0f);
+    bakeProg_.set("uResolvedPc", 300.0f);
+    static const float dustScale = std::getenv("BHS_DUST_SCALE") ? static_cast<float>(std::atof(std::getenv("BHS_DUST_SCALE"))) : 1.0f;
+    bakeProg_.set("uDustScale", dustScale);
     bakeProg_.set("uSpriteGrid", kSpriteGrid);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, nearGalBuf_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, spriteBuf_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, spriteTileBuf_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, spriteIndexBuf_);
     glBindImageTexture(0, cube_, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-    glDispatchCompute(static_cast<GLuint>(kBakeRes / 16), static_cast<GLuint>(kBakeRes / 16), 1);
+    static const bool debugBake = std::getenv("BHS_DEBUG_BAKE") != nullptr;
+    const double tb = debugBake ? (glFinish(), glfwGetTime()) : 0.0;
+    glDispatchCompute(static_cast<GLuint>(bakeRes_ / 16), static_cast<GLuint>(rows / 16), 1);
+    if (debugBake) {
+        glFinish();
+        logInfo("sky bake face {} rows {}-{}: {:.2f} ms ({} near galaxies)", face, row0, row0 + rows, (glfwGetTime() - tb) * 1000.0, nearGalCount_);
+    }
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT);
     glUseProgram(0);
-    if (face == 5) {
+    if (step == bakeSteps() - 1) {
         glMemoryBarrier(GL_ALL_BARRIER_BITS);
         glBindTexture(GL_TEXTURE_CUBE_MAP, cube_);
         glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
         glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    }
+}
+
+void UniverseScene::refreshGalaxyDistances(const glm::dvec3& camGal) {
+    if (glm::length(camGal - galDistAt_) < 0.01 * std::min(galSurfaceM_ > 0.0 ? galSurfaceM_ : galCentreM_, galCentreM_)) return;
+    galDistAt_ = camGal;
+    galCentreM_ = glm::length(camGal - content_.host.center);
+    galSurfaceM_ = 1e300;
+    for (const universe::GalaxyRecord& g : content_.galaxies) {
+        const double dc = glm::length(g.model.center - camGal);
+        galCentreM_ = std::min(galCentreM_, dc);
+        const double ds = dc - g.model.boundingRadiusPc() * units::kParsec;
+        if (ds > 0.0) galSurfaceM_ = std::min(galSurfaceM_, ds);
     }
 }
 
@@ -506,10 +649,28 @@ void UniverseScene::buildTargets(double simSeconds) {
         t.absMag = s.absMag;
         targets_.push_back(t);
     }
+    // The home galaxy as a whole, seen from outside.
+    {
+        UniverseTarget t;
+        t.name = content_.mode == universe::Mode::Real ? "Milky Way, seen from outside" : "Home galaxy, seen from outside";
+        t.pos = toRenderer(content_.host.center);
+        t.radius = 0.55 * content_.host.boundingRadiusPc() * units::kParsec / metersPerM_;
+        t.kind = 1;
+        t.info = "the whole galaxy around the black hole";
+        t.axis = glm::normalize(R_ * content_.host.normal);
+        targets_.push_back(t);
+    }
     for (const universe::GalaxyRecord& g : content_.galaxies) {
         const std::string n = nameOf(g.name);
         if (n.empty()) continue;
-        targets_.push_back({n, toRenderer(g.model.center), 0.5 * g.model.boundingRadiusPc() * units::kParsec / metersPerM_, 1, "galaxy"});
+        UniverseTarget t;
+        t.name = n;
+        t.pos = toRenderer(g.model.center);
+        t.radius = 0.5 * g.model.boundingRadiusPc() * units::kParsec / metersPerM_;
+        t.kind = 1;
+        t.info = "galaxy";
+        if (g.model.type != universe::GalaxyType::Elliptical) t.axis = glm::normalize(R_ * g.model.normal);
+        targets_.push_back(t);
     }
     for (const universe::NamedPlace& p : content_.places)
         targets_.push_back({p.name, toRenderer(p.pos), std::max(p.radiusMeters, 1.0) / metersPerM_, 2, "place"});
@@ -603,12 +764,10 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
         b.info = "star";
         bodies.push_back(b);
     }
-    for (const universe::GalaxyRecord& g : content_.galaxies) {
-        const double d = (glm::length(g.model.center - camGal) - g.model.boundingRadiusPc() * units::kParsec) / metersPerM_;
-        if (d > 0.0 && d < nearestSurfaceM_) {
-            nearestSurfaceM_ = d;
-            nearestName_ = "a galaxy";
-        }
+    refreshGalaxyDistances(camGal);
+    if (galSurfaceM_ / metersPerM_ < nearestSurfaceM_) {
+        nearestSurfaceM_ = galSurfaceM_ / metersPerM_;
+        nearestName_ = "a galaxy";
     }
 
     // ---- solar system (real universe)
@@ -675,20 +834,20 @@ void UniverseScene::prepareRender(const glm::dvec3& camPosM) {
     }
     starsChanged_ = false;
 
-    // ---- sky bake from the viewpoint, one face per frame while stale
-    double dGal = glm::length(camGal - content_.host.center);
-    for (const universe::GalaxyRecord& g : content_.galaxies) dGal = std::min(dGal, glm::length(camGal - g.model.center));
-    // A full cycle (six faces, one per frame) always completes with the viewpoint and galaxy lists
+    // ---- sky bake from the viewpoint, one strip of a face per frame while stale
+    refreshGalaxyDistances(camGal);
+    const double dGal = galCentreM_;
+    // A full cycle (every strip of the six faces) always completes with the viewpoint and galaxy lists
     // captured at its start; if the camera moved meanwhile, another cycle follows.
     const double thr = std::max(0.5 * units::kParsec, 0.004 * dGal);
     if (glm::length(camGal - bakeCam_) > thr || remap) bakeDirty_ = true;
-    if (bakeFace_ >= 6 && bakeDirty_) bakeFace_ = 0;
-    if (bakeFace_ == 0) {
+    if (bakeStep_ >= bakeSteps() && bakeDirty_) bakeStep_ = 0;
+    if (bakeStep_ == 0) {
         bakeCam_ = camGal;
         buildGalaxyLists(camGal);
         bakeDirty_ = false;
     }
-    if (bakeFace_ < 6) bakeFace(bakeFace_++, camGal);
+    if (bakeStep_ < bakeSteps()) bakeChunk(bakeStep_++);
 }
 
 }  // namespace bhs

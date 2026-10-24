@@ -50,6 +50,7 @@ struct Options {
     std::string flyTarget;      // --fly NAME: start a flight to a target at launch
     int universe = -1;          // --universe backdrop|invented|real
     long long universeSeed = -1; // --universe-seed N
+    double fovDeg = 0.0;        // --fov DEG (vertical field of view)
     int placement = -1;         // --placement sgra|sun
     std::string screenshot;
     std::string cinematic;

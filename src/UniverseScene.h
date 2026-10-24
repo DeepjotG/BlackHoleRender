@@ -26,12 +26,13 @@ struct UniverseTarget {
     int kind = 0;             // 0 star, 1 galaxy, 2 place, 3 planet
     std::string info;
     float absMag = 0.0f;      // stars: absolute visual magnitude
+    glm::dvec3 axis{0.0};     // galaxies: disk normal (renderer frame), so visits arrive at a flattering angle
 };
 
 class UniverseScene {
 public:
     static constexpr int kTileGrid = 128;      // star tiles per cube-face edge
-    static constexpr int kBakeRes = 512;       // diffuse cubemap face size
+    static constexpr int kBakeChunkRows = 256; // rows of one cube face baked per frame
 
     bool init();
     void shutdown();
@@ -81,7 +82,7 @@ private:
     void rebuildMapping(double bhMassSolar);
     void uploadStars(const glm::dvec3& originGal);
     void projectStars(const glm::dvec3& camGal, float limitingMag);
-    void bakeFace(int face, const glm::dvec3& camGal);
+    void bakeChunk(int step);   // step 0 .. 6 * chunks - 1
     void buildGalaxyLists(const glm::dvec3& camGal);
     void buildTargets(double simSeconds);
     void appendPlanetarySystem(const universe::StarRecord& st, const std::string& starName, double simSeconds,
@@ -120,7 +121,9 @@ private:
     GLuint nearGalBuf_ = 0, spriteBuf_ = 0, spriteTileBuf_ = 0, spriteIndexBuf_ = 0;
     int nearGalCount_ = 0;
     glm::dvec3 bakeCam_{1e300};
-    int bakeFace_ = 6;           // 0..5 = next face to bake, 6 = idle
+    int bakeRes_ = 512;          // diffuse cubemap face size (BHS_BAKE_RES overrides)
+    int bakeStep_ = 1 << 30;     // next chunk to bake; >= bakeSteps() = idle
+    int bakeSteps() const { return 6 * std::max(1, bakeRes_ / kBakeChunkRows); }
     bool bakeOk_ = false;
     bool bakeDirty_ = true;
     bool targetsBuilt_ = false;
@@ -130,6 +133,11 @@ private:
     std::vector<universe::StarRecord> proc_;   // procedural stars from the last gather
 
     std::vector<UniverseTarget> targets_;
+    // Distances to the nearest galaxy surface / centre (galactic frame, m), refreshed after the camera
+    // moves 1% of them: a scan of every galaxy is too slow to repeat each frame.
+    void refreshGalaxyDistances(const glm::dvec3& camGal);
+    glm::dvec3 galDistAt_{1e300};
+    double galSurfaceM_ = 1e300, galCentreM_ = 1e300;
     std::string status_;
     double jd0_ = 0.0;           // Julian date when the simulation started (real universe)
 };
