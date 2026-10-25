@@ -99,6 +99,8 @@ private:
     int gasLive_[4] = {1, 1, 1, 1};   // volumes worth marching (peak optical depth per texel, read a frame late)
     ShaderProgram gasPeakProg_;
     GLuint gasPeakBuf_[2] = {0, 0};
+    GLuint gasOccBuf_ = 0;           // occupied 8^3 blocks per volume (see gas_peak.comp)
+    bool gasOccOk_ = false;
     int gasPeakFrame_ = 0;
     void smoothGas(const FrameInput& in);
     ShaderProgram accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;

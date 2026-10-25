@@ -470,9 +470,14 @@ void App::frame() {
         const tde::GasVolume& gv = tde_.volume(i);
         if (gv.texture) gasRefs_.push_back({gv.texture, gv.center, gv.halfSize, gv.resolution});
     }
+    static const bool noGas = std::getenv("BHS_NO_GAS") != nullptr;   // debug: simulate but do not draw the gas
+    if (noGas) gasRefs_.clear();
     fi.gas = gasRefs_.data();
     fi.gasCount = static_cast<int>(gasRefs_.size());
-    fi.gasRefLen = static_cast<float>(std::max(40.0 * tde_.starRadiusM(), 1e-6));   // thin streams in coarse cells stay visible
+    // 8 star radii: longer lengths make the coarse grids' smeared copy of the debris glow and absorb, which
+    // hides the torn star behind a fog (BHS_GAS_REFLEN overrides, in star radii).
+    static const double refRadii = std::getenv("BHS_GAS_REFLEN") ? std::atof(std::getenv("BHS_GAS_REFLEN")) : 8.0;
+    fi.gasRefLen = static_cast<float>(std::max(refRadii * tde_.starRadiusM(), 1e-6));
     if (std::getenv("BHS_DEBUG_TDE") && !gasRefs_.empty()) {
         static int n = 0;
         if (++n % 30 == 0) {

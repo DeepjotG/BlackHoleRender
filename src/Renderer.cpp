@@ -46,6 +46,7 @@ bool Renderer::init() {
 void Renderer::shutdown() {
     for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &traceGasProg_, &traceGasBodiesProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_, &gasBlurProg_, &gasPeakProg_}) p->destroy();
     if (gasPeakBuf_[0]) glDeleteBuffers(2, gasPeakBuf_);
+    if (gasOccBuf_) glDeleteBuffers(1, &gasOccBuf_);
     for (auto& pair : gasSmooth_)
         if (pair[0]) glDeleteTextures(2, pair);
     destroyTarget(trace_);
@@ -238,6 +239,18 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     static const float gbOverride = std::getenv("BHS_GAS_BRIGHTNESS") ? static_cast<float>(std::atof(std::getenv("BHS_GAS_BRIGHTNESS"))) : -1.0f;
     p.set("uGasBrightness", gbOverride > 0.0f ? gbOverride : s.gasBrightness);
     p.set("uGasRefLen", in.gasRefLen);
+    {
+        glm::vec3 ulo(1e30f), uhi(-1e30f);
+        for (int i = 0; i < ng; ++i)
+            if (gasLive_[i]) {
+                ulo = glm::min(ulo, in.gas[i].center - glm::vec3(in.gas[i].halfSize));
+                uhi = glm::max(uhi, in.gas[i].center + glm::vec3(in.gas[i].halfSize));
+            }
+        p.set("uGasUnionLo", ulo);
+        p.set("uGasUnionHi", uhi);
+    }
+    p.set("uGasOccOk", gasOccOk_ && ng > 0 ? 1 : 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, gasOccBuf_);
     for (int i = 0; i < 4; ++i) p.set("uGasLive[" + std::to_string(i) + "]", i < ng ? gasLive_[i] : 0);
     p.set("uGasOpacity", s.gasOpacity);
     for (int i = 0; i < 4; ++i) {
@@ -256,7 +269,9 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     p.set("uMaxSteps", s.maxSteps);
     p.set("uStepScale", s.stepScale);
     p.set("uDiskStep", s.diskStep);
-    p.set("uDiskMode", s.diskMode);
+    // During a star disruption the steady disk fades out; once gone it is not marched at all (its fine
+    // slab steps are a large share of the frame), and while fading its absorption fades with its light.
+    p.set("uDiskMode", in.diskFade > 0.01f ? s.diskMode : DISK_NONE);
     p.set("uDopplerStrength", s.dopplerStrength);
     p.set("uShadowOverlay", s.showShadowOverlay ? 1 : 0);
     p.set("uPixelOmega0", pixelAngle * pixelAngle);
@@ -266,7 +281,7 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     p.set("uDiskOuter", s.diskOuter);
     p.set("uDiskThickness", s.diskThickness);
     p.set("uDiskDensity", s.diskDensity);
-    p.set("uDiskOpacity", s.diskOpacity);
+    p.set("uDiskOpacity", s.diskOpacity * std::clamp(in.diskFade, 0.0f, 1.0f));
     p.set("uDiskPeakTemp", s.diskPeakTemp);
     p.set("uDiskBrightness", s.diskBrightness * in.diskFade);
     p.set("uDiskNoiseScale", s.diskNoiseScale);
@@ -288,7 +303,11 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
 
 ShaderProgram& Renderer::traceFor(const FrameInput& in) {
     const bool bodies = in.bodies && !in.bodies->empty();
-    const bool gas = in.gas && in.gasCount > 0;
+    // The gas-capable tracer is slower even with nothing to draw (code and registers in the hot loop):
+    // use it only while some volume is live.
+    bool anyLive = false;
+    for (int i = 0; i < std::min(in.gasCount, 4); ++i) anyLive = anyLive || gasLive_[i] != 0;
+    const bool gas = in.gas && in.gasCount > 0 && anyLive;
     if (gas) return bodies ? traceGasBodiesProg_ : traceGasProg_;
     return bodies ? traceBodiesProg_ : traceProg_;
 }
@@ -550,11 +569,24 @@ void Renderer::smoothGas(const FrameInput& in) {
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, writeBuf);
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof zero, zero);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, writeBuf);
+        if (!gasOccBuf_) {
+            glGenBuffers(1, &gasOccBuf_);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, gasOccBuf_);
+            glBufferData(GL_SHADER_STORAGE_BUFFER, 4 * 512 * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, gasOccBuf_);
+        glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, zero);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, gasOccBuf_);
+        bool occAll = true;   // every live volume's occupancy is written (64^3 volumes have 512 blocks)
         gasPeakProg_.use();
         gasPeakProg_.set("uSrc", 0);
         for (int i = 0; i < ng; ++i) {
             const int res = in.gas[i].resolution;
-            if (res <= 0 || !gasSmooth_[i][0]) continue;
+            if (res <= 0 || !gasSmooth_[i][0]) {
+                occAll = false;
+                continue;
+            }
+            if (res != 64) occAll = false;
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_3D, gasSmooth_[i][0]);
             gasPeakProg_.set("uRes", res);
@@ -565,6 +597,8 @@ void Renderer::smoothGas(const FrameInput& in) {
         }
         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, 0);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, 0);
+        gasOccOk_ = occAll && ng > 0;
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         ++gasPeakFrame_;
     }

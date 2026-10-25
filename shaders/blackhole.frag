@@ -127,6 +127,14 @@ void main() {
     float hitT = 0.0;
     float travelled = 0.0;
     float nearTol = max(2e-6 * rcam, 1e-9);   // well above float quantisation of x near the camera
+#if BHS_GAS
+    // Where the ray first reaches the region holding star-disruption gas (geodesic state and path
+    // length). The gas is integrated in its own pass after the march: in the march loop its code would
+    // raise register pressure and slow every ray, gas or not.
+    bool gasIn = false;
+    vec3 gasX = vec3(0.0), gasV = vec3(0.0);
+    float gasT0 = 0.0;
+#endif
     if (uFarMode != 0) {
         status = 1;
         escDir = dir;
@@ -142,15 +150,19 @@ void main() {
             }
             if (dot(x, v) > 0.0 && r > rEscMin) {
                 float b = h / vlen;
-                bool gasAhead = false;
-#if BHS_GAS
-                // Debris far from the hole (a giant's stream at hundreds of M) lies beyond the usual
-                // escape radius: keep marching while the ray is inside or still heading for a volume.
-                gasAhead = gasCellSize(x) > 0.0 || gasEntryDistance(x, v / vlen) < 1e29;
-#endif
-                if (!gasAhead && (!lensing || 0.75 * b * b * b / (r * r * r * r) < ESC_TOL)) {
+                if (!lensing || 0.75 * b * b * b / (r * r * r * r) < ESC_TOL) {
                     escDir = lensing ? farFieldDirection(x, v, h2) : normalize(v);
                     status = 1;
+#if BHS_GAS
+                    // Gas still ahead of an escaping ray (a giant's debris lies far beyond the escape
+                    // radius): the gas pass continues from here.
+                    if (!gasIn && gasRayHitsBox(x, normalize(v), uGasUnionLo, uGasUnionHi)) {
+                        gasIn = true;
+                        gasX = x;
+                        gasV = v;
+                        gasT0 = travelled;
+                    }
+#endif
                     break;
                 }
             }
@@ -177,14 +189,6 @@ void main() {
                 ds = min(ds, max(0.5 * (length(x - pr.xyz) - pr.w), 0.25 * pr.w));
             }
 #endif
-#if BHS_GAS
-            // Gas of a star being torn apart: fine steps inside its volumes; outside, land on the
-            // nearest volume instead of stepping over it.
-            float gasCell = gasCellSize(x);
-            if (gasCell > 0.0) ds = min(ds, max(1.5 * gasCell, 1e-6 * r));
-            float te = gasEntryDistance(x, v / vlen);   // a volume ahead (possibly finer than this one)
-            if (te < ds) ds = max(te + 1e-4 * max(r, 1.0), 1e-6 * r);
-#endif
             float dt = ds / vlen;
             vec3 x0 = x, v0 = v;
             if (lensing) rk4Step(x, v, h2, dt);
@@ -192,6 +196,15 @@ void main() {
             steps = i + 1;
             float seg = length(x - x0);
             travelled += seg;
+#if BHS_GAS
+            // First step that touches the gas region: the gas pass starts here (see after the loop).
+            if (!gasIn && gasSegmentHitsBox(x0, x, uGasUnionLo, uGasUnionHi)) {
+                gasIn = true;
+                gasX = x0;
+                gasV = v0;
+                gasT0 = travelled - seg;
+            }
+#endif
 
             if (uDiskMode == DISK_THIN) {
                 if ((x.y > 0.0) != (x0.y > 0.0)) {
@@ -218,19 +231,6 @@ void main() {
                     if (transmittance < 0.004) break;
                 }
             }
-#if BHS_GAS
-            {
-                float cellHere = gasCell > 0.0 ? gasCell : gasCellSize(x);
-                if (cellHere > 0.0 && seg > 0.0) {
-                    int n = clamp(int(ceil(seg / cellHere)), 1, 8);
-                    float sub = seg / float(n);
-                    // Per-pixel, per-frame offset of the samples: banding against the volume's texel
-                    // grid becomes fine noise that frame accumulation averages away.
-                    float gj = hash12(gl_FragCoord.xy + fract(uJitter * 7.31) * 1024.0);
-                    for (int k = 0; k < n; ++k) gasSample(mix(x0, x, (float(k) + gj) / float(n)), sub, color, transmittance);
-                }
-            }
-#endif
             if (transmittance < 0.004) { status = 3; break; }
 
 #if BHS_BODIES
@@ -298,6 +298,49 @@ void main() {
     if (status == 1) sky = uUniverse != 0 ? sampleUniverseSky(escDir, ddx, ddy, uPixelOmega0)
                                           : sampleSky(escDir, ddx, ddy, uPixelOmega0, rcam);
     color += transmittance * sky;
+
+#if BHS_GAS
+    // ---- Gas pass: re-integrate the geodesic from where it reached the gas region and composite the
+    // gas in front (the steady disk is faded out during an event). Gas beyond whatever ended the march
+    // (horizon, a body) is hidden.
+    if (gasIn) {
+        vec3 gCol = vec3(0.0);
+        float gT = 1.0;
+        float tEnd = status == 1 ? 1e30 : travelled;
+        vec3 gx = gasX, gv = gasV;
+        float gt = gasT0;
+        // Per-pixel, per-frame offset of the samples: banding against the volumes' texel grids becomes
+        // fine noise that frame accumulation averages away.
+        float gj = hash12(gl_FragCoord.xy + fract(uJitter * 7.31) * 1024.0);
+        for (int i = 0; i < 512; ++i) {
+            float r = length(gx);
+            if (r < R_HORIZON + 0.02 || gt >= tEnd || gT < 0.004) break;
+            float vlen = length(gv);
+            float cell = gasCellSize(gx);
+            float te = gasEntryDistance(gx, gv / vlen);
+            if (cell == 0.0 && te > 1e29 && dot(gx, gv) > 0.0) break;   // past all the gas, leaving
+            float ds = max(uStepScale * r * farMul, 0.02);
+            // Volumes are pre-smoothed: steps of up to 4 cells carry several samples; empty blocks are
+            // crossed in big strides; a volume ahead is landed on rather than stepped over.
+            if (cell > 0.0) ds = min(ds, max(4.0 * cell, 1e-6 * r));
+            else if (cell < 0.0) ds = min(ds, max(-cell, 1e-6 * r));
+            if (te < ds) ds = max(te + 1e-4 * max(r, 1.0), 1e-6 * r);
+            ds = min(ds, tEnd - gt);
+            vec3 x0 = gx;
+            if (lensing) rk4Step(gx, gv, h2, ds / vlen);
+            else gx += gv * (ds / vlen);
+            float seg = length(gx - x0);
+            gt += seg;
+            float cellHere = cell > 0.0 ? cell : gasCellSize(gx);
+            if (cellHere > 0.0 && seg > 0.0) {
+                int n = clamp(int(ceil(seg / (2.5 * cellHere))), 1, 8);   // ~2.5-cell spacing (jittered)
+                float sub = seg / float(n);
+                for (int k = 0; k < n; ++k) gasSample(mix(x0, gx, (float(k) + gj) / float(n)), sub, gCol, gT);
+            }
+        }
+        color = gCol + gT * color;
+    }
+#endif
 
     if (uShadowOverlay != 0 && uFarMode == 0) {
         float ang = acos(clamp(dot(dir, -uCamPos / rcam), -1.0, 1.0));
