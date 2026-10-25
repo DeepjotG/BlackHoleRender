@@ -933,9 +933,9 @@ void App::updateWorld(float dt, const Camera::Input& in) {
             const glm::dvec3 out = glm::length(p) > 0.0 ? glm::normalize(p) : glm::dvec3(1.0, 0.0, 0.0);
             const glm::dvec3 vel = tde_.starVelocity();
             const glm::dvec3 vh = glm::length(vel) > 0.0 ? glm::normalize(vel) : glm::dvec3(0.0);
-            // Once torn apart, the debris stretches towards the hole: swing up above the orbit and back
-            // off to frame the stream side-on together with the hole.
-            const bool torn = !tde_.starIntact();
+            // Once the debris has stretched over several star radii, swing up above the orbit and back off
+            // to frame the stream side-on together with the hole; until then stay close to the star.
+            const bool torn = !tde_.starIntact() && extent > 4.0 * tde_.starRadiusM();
             const double dist = torn ? std::max(4.0 * extent, 1.1 * glm::length(p)) : std::max(14.0 * tde_.starRadiusM(), 4.0 * extent);
             const glm::dvec3 dirWant = torn ? glm::normalize(watchNormal_ * 0.85 + out * 0.45 - vh * 0.25)
                                             : glm::normalize(out + watchNormal_ * 0.45 - vh * 0.35);
