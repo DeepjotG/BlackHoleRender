@@ -311,7 +311,7 @@ int App::run(const Options& opt) {
             frame();
             if (opt.frames > 0 && frameIndex_ >= opt.frames) break;
         }
-        if (!automated) settings_.save(opt_.settingsPath);
+        if (!automated) saveSettings();
     }
     shutdown();
     return rc;
@@ -444,7 +444,7 @@ void App::frame() {
     }
     if (requestSave_) {
         requestSave_ = false;
-        settings_.save(opt_.settingsPath);
+        saveSettings();
     }
     if (settings_.vsync != vsyncApplied_) {
         vsyncApplied_ = settings_.vsync;
@@ -754,6 +754,13 @@ void App::buildBodies() {
     universe_.update(camera_.position(), simSeconds_, settings_, bodies_);
 }
 
+void App::saveSettings() {
+    // A star disruption's auto time warp (up to millions x) must not become the next session's warp.
+    Settings out = settings_;
+    if (userWarp_ >= 0.0) out.timeWarp = userWarp_;
+    out.save(opt_.settingsPath);
+}
+
 void App::applyUniverseSettings() {
     const int mode = settings_.universeMode;
     if (mode == uniModeApplied_ && (mode != 1 || settings_.universeSeed == uniSeedApplied_) &&
@@ -817,8 +824,15 @@ void App::updateTde(double dtM) {
         watchPrev_ = p;
         watchPeriM_ = std::max(tde_.stats().pericenterM, 2.5);
     }
-    if (!tde_.active()) return;
+    if (!tde_.active()) {
+        if (userWarp_ >= 0.0) {   // the event is over: back to the user's own time warp
+            settings_.timeWarp = userWarp_;
+            userWarp_ = -1.0;
+        }
+        return;
+    }
     if (tdeCtl_.autoWarp) {
+        if (userWarp_ < 0.0) userWarp_ = settings_.timeWarp;
         // Keep the event moving at a watchable pace: about 1/15 of the local dynamical time per
         // second while the star falls in, growing with the age of the debris afterwards.
         const tde::TdeStats& st = tde_.stats();
@@ -833,6 +847,20 @@ void App::updateTde(double dtM) {
 }
 
 void App::updateWorld(float dt, const Camera::Input& in) {
+    // Test hook: BHS_SWITCH_UNIVERSE="frame:mode[,frame:mode...]" picks a universe mid-run, exactly as the
+    // Universe menu does (mode 0 backdrop, 1 invented, 2 real).
+    if (const char* sw = std::getenv("BHS_SWITCH_UNIVERSE")) {
+        for (const char* q = sw; *q;) {
+            int f = 0, m = 0;
+            if (std::sscanf(q, "%d:%d", &f, &m) == 2 && f == frameIndex_) {
+                logInfo("test hook: switching to universe mode {} at frame {}", m, f);
+                settings_.universeMode = m;
+            }
+            const char* comma = std::strchr(q, ',');
+            if (!comma) break;
+            q = comma + 1;
+        }
+    }
     static bool fetchAuto = std::getenv("BHS_FETCH_CATALOG") != nullptr;   // test hook: press the button at start
     if (fetchAuto && settings_.universeMode == 2) {
         fetchAuto = false;

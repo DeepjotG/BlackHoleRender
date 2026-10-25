@@ -374,8 +374,14 @@ void Ui::draw(UiContext& c) {
                 if (p.orbitRadiusM < 6.0)
                     ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Inside the innermost stable orbit (6 M): it would spiral in.");
                 const double roche = BlackHoleSystem::rocheLimitM(p, s.bhMassSolar);
-                if (p.orbitRadiusM < roche)
-                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Tides would tear it apart here (needs r > %.3g M at this mass).", roche);
+                if (p.orbitRadiusM < roche) {
+                    // A physics note (lighter black holes have stronger tides at a given radius in M),
+                    // not an error: the planet is still drawn; one click moves it to a safe orbit.
+                    ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Note: at this black hole mass, tides would tear it apart here.");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Move it out")) p.orbitRadiusM = roche * 1.15;
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Moves the orbit to %.3g M, just outside the tidal limit (%.3g M).", roche * 1.15, roche);
+                }
                 ImGui::PopID();
             }
             ImGui::TextDisabled("The film's '1 hour = 7 years' needs a fast-spinning black hole; around a non-spinning one");
