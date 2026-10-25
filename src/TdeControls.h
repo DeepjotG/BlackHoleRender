@@ -35,9 +35,10 @@ inline const TdeScenario kTdeScenarios[] = {
     {"White dwarf vs an intermediate-mass hole", 1e4, 5, 1.5, 20.0},
 };
 inline constexpr int kTdeScenarioCount = static_cast<int>(sizeof(kTdeScenarios) / sizeof(kTdeScenarios[0]));
+inline constexpr int kTdeScenarioCustom = kTdeScenarioCount;   // "Custom": the star and orbit as set by hand
 
 struct TdeControls {
-    int scenario = 0;
+    int scenario = 0;              // index into kTdeScenarios, or kTdeScenarioCustom
     int starPreset = 0;
     double massSolar = 1.0, radiusSolar = 1.0, teff = 5772.0, polytropeN = 3.0;
     double beta = 2.0;

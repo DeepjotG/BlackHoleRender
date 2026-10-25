@@ -157,20 +157,27 @@ it apart on the GPU: the star stretches into a long stream, half of the gas esca
 falls back, crashes into itself and forms a hot disk, and whatever crosses the horizon is eaten.
 The gas is rendered with the same lensing as everything else.
 
+* **Spawn star plays the selected scenario exactly**, including its black hole mass; changing the
+  star or the orbit by hand turns it into *Custom*, which keeps the current black hole.
 * **Scenarios** pick a black hole mass, a star and an orbit, e.g. a Sun-like star around
   Sagittarius A* (torn apart close to the hole and strongly lensed) or a red supergiant around
   Gargantua. Whether a star is torn apart depends on its size and the hole's mass: Gargantua
   swallows Sun-like stars whole.
 * **Penetration (beta)** sets how deep the orbit dives (pericentre = tidal radius / beta).
 * **Auto time warp** keeps the event watchable: the fall-in takes days to centuries of simulated
-  time depending on the scenario, and the debris keeps returning for much longer.
+  time depending on the scenario, and the debris keeps returning for much longer. The event runs on
+  its own clock (shown in the panel); the planets and the rest of the world keep your time warp.
+* **What it is doing** is spelled out in the panel: falling in, being torn apart, the stream (half
+  of the gas escapes), and the bound half falling back about half a minute later.
 * **The camera** rides along with the star as it falls in, the black hole looming behind it; once
   the star is torn apart it swings above the orbit to show the stretching debris side-on next to
   the hole, pulls back while the stream flies off, and comes in close when the bound debris falls
   back and wraps the hole in a glowing, lensed cocoon of hot gas. Fly or look around at any time to
   take over.
 * **The steady accretion disk fades out** during an event (a real disruption happens around a quiet
-  black hole and builds its own disk from the debris); tick *Keep the steady disk* to keep it.
+  black hole and builds its own disk from the debris); *Clear* brings it back (it also returns by
+  itself after a star is swallowed whole), and *Keep the steady disk* keeps it. The disk's on/off
+  switch and rotation speed are in the *Black hole & time* section.
 * **Gas brightness and opacity** (Quality panel) scale the debris' glow and absorption.
 
 How it is simulated: until it reaches about twice the tidal radius the star moves rigidly on an

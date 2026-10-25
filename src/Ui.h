@@ -46,6 +46,9 @@ struct UiContext {
     TdeControls* tde = nullptr;
     const tde::TdeStats* tdeStats = nullptr;
     bool tdeActive = false;
+    int tdePhase = 0;               // 0 none, 1 falling in, 2 torn apart, 3 stream, 4 falling back, 5 swallowed whole
+    double tdeWarp = 0.0;           // the star disruption's own clock (simulated s per real s)
+    bool diskHidden = false;        // the steady disk is faded out while a star disruption plays
     const std::vector<UniverseTarget>* uniTargets = nullptr;
     const char* universeStatus = "";
     const char* universeError = "";
@@ -74,6 +77,7 @@ private:
     bool inited_ = false;
     bool showHelp_ = true;
     char searchBuf_[96] = {0};
+    int lastDiskMode_ = 2;          // disk mode to restore when the disk is switched back on
 };
 
 }  // namespace bhs

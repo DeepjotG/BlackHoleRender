@@ -269,7 +269,7 @@ void Ui::draw(UiContext& c) {
     // ---- universe ----
     if (ImGui::CollapsingHeader("Universe", ImGuiTreeNodeFlags_DefaultOpen)) {
         const char* modes[] = {"Painted backdrop", "Invented 3D universe", "Real 3D universe"};
-        ImGui::Combo("Universe", &s.universeMode, modes, 3);
+        ImGui::Combo("Universe##mode", &s.universeMode, modes, 3);
         if (s.universeMode == 1) {
             int seed = static_cast<int>(s.universeSeed);
             if (ImGui::InputInt("Universe seed", &seed, 1, 100, ImGuiInputTextFlags_EnterReturnsTrue)) s.universeSeed = static_cast<uint32_t>(std::max(0, seed));
@@ -277,7 +277,7 @@ void Ui::draw(UiContext& c) {
             if (ImGui::SmallButton("New universe")) s.universeSeed = static_cast<uint32_t>(std::rand());
         } else if (s.universeMode == 2) {
             const char* places[] = {"Sagittarius A* (centre of the Milky Way)", "Near the Sun (fictional Gargantua)"};
-            ImGui::Combo("Black hole", &s.realPlacement, places, 2);
+            ImGui::Combo("Black hole##placement", &s.realPlacement, places, 2);
         }
         if (s.universeMode != 0) {
             ImGui::SliderFloat("Deep-sky exposure", &s.deepSky, 1.0f, 30.0f, "%.0fx", ImGuiSliderFlags_Logarithmic);
@@ -323,6 +323,20 @@ void Ui::draw(UiContext& c) {
         }
         ImGui::Text("1 s here = %s   elapsed %s%s", units::formatDuration(s.timeWarp).c_str(),
                     units::formatDuration(c.simSeconds).c_str(), s.paused ? "   [paused, P]" : "");
+        // The steady accretion disk: on/off and how fast it turns (more settings under "Accretion disk").
+        bool diskOn = s.diskMode != DISK_NONE;
+        if (ImGui::Checkbox("Accretion disk##on", &diskOn)) {
+            if (!diskOn) lastDiskMode_ = s.diskMode;
+            s.diskMode = diskOn ? (lastDiskMode_ != DISK_NONE ? lastDiskMode_ : DISK_VOLUMETRIC) : DISK_NONE;
+        }
+        if (diskOn) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(170.0f);
+            ImGui::SliderFloat("Disk rotation", &s.diskSpeed, 0.0f, 10.0f, "%.2fx");
+        }
+        if (diskOn && c.diskHidden)
+            ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Hidden while the star disruption plays: press Clear there to bring it back.");
+        if (diskOn && s.paused) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the disk and the clock are stopped.");
         if (s.universeMode == 2 && c.simJulianDate > 0.0) {
             const double unix = (c.simJulianDate - 2440587.5) * 86400.0;
             if (unix > -6.2e10 && unix < 2.5e11) {   // gmtime handles roughly years 0..9999
@@ -394,12 +408,17 @@ void Ui::draw(UiContext& c) {
         TdeControls& t = *c.tde;
         if (!t.moduleAvailable)
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "The simulation module is not in this build yet.");
-        const char* scen[kTdeScenarioCount];
+        // A scenario is a complete event (black hole mass, star, orbit): "Spawn star" plays exactly what is
+        // selected. Editing the star or the orbit below turns it into "Custom", which uses the current mass.
+        const char* scen[kTdeScenarioCount + 1];
         for (int i = 0; i < kTdeScenarioCount; ++i) scen[i] = kTdeScenarios[i].name;
-        if (ImGui::Combo("Scenario", &t.scenario, scen, kTdeScenarioCount)) s.bhMassSolar = t.applyScenario(t.scenario);
+        scen[kTdeScenarioCustom] = "Custom (the star and orbit below, this black hole)";
+        if (ImGui::Combo("Scenario", &t.scenario, scen, kTdeScenarioCount + 1) && t.scenario < kTdeScenarioCount)
+            s.bhMassSolar = t.applyScenario(t.scenario);
+        const double before[6] = {t.massSolar, t.radiusSolar, t.teff, t.beta, t.inclinationDeg, t.retrograde ? 1.0 : 0.0};
         const char* stars[kStarPresetCount];
         for (int i = 0; i < kStarPresetCount; ++i) stars[i] = kStarPresets[i].name;
-        if (ImGui::Combo("Star", &t.starPreset, stars, kStarPresetCount)) {
+        if (ImGui::Combo("Star##preset", &t.starPreset, stars, kStarPresetCount)) {
             t.applyStarPreset(t.starPreset);
         }
         sliderLogD("Star mass (suns)", &t.massSolar, 0.08, 150.0, "%.3g");
@@ -409,13 +428,18 @@ void Ui::draw(UiContext& c) {
         const double incMin = -80.0, incMax = 80.0;
         ImGui::SliderScalar("Orbit tilt (deg)", ImGuiDataType_Double, &t.inclinationDeg, &incMin, &incMax, "%.0f");
         ImGui::Checkbox("Retrograde", &t.retrograde);
-        // What will happen, from the tidal radius r_t = R_star (M_bh / M_star)^(1/3).
-        const double mPerM = units::metersPerM(s.bhMassSolar);
+        const double after[6] = {t.massSolar, t.radiusSolar, t.teff, t.beta, t.inclinationDeg, t.retrograde ? 1.0 : 0.0};
+        for (int i = 0; i < 6; ++i)
+            if (after[i] != before[i]) t.scenario = kTdeScenarioCustom;
+        // What will happen, from the tidal radius r_t = R_star (M_bh / M_star)^(1/3), for the black hole the
+        // spawn will use.
+        const double bhMass = t.scenario < kTdeScenarioCount ? kTdeScenarios[t.scenario].bhMassSolar : s.bhMassSolar;
+        const double mPerM = units::metersPerM(bhMass);
         const double rStar = t.radiusSolar * units::kSolarRadius / mPerM;
-        const double rt = rStar * std::cbrt(s.bhMassSolar / t.massSolar);
+        const double rt = rStar * std::cbrt(bhMass / t.massSolar);
         const double rp = rt / t.beta;
-        ImGui::TextDisabled("tidal radius %.4g M (%s), closest approach %.4g M", rt, units::formatDistance(rt * mPerM).c_str(), rp);
-        if (rp < 4.0) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Too compact for these tides: it will be swallowed whole.");
+        ImGui::TextDisabled("black hole %s: tidal radius %.4g M, closest approach %.4g M", units::formatMassSolar(bhMass).c_str(), rt, rp);
+        if (rp < 4.0) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Too compact for these tides: it will be swallowed whole.");
         else if (t.beta < 0.6) ImGui::TextDisabled("A grazing pass: the star loses some gas but survives.");
         else ImGui::TextDisabled("The tides will tear it apart.");
         ImGui::BeginDisabled(!t.moduleAvailable);
@@ -432,15 +456,22 @@ void Ui::draw(UiContext& c) {
         if (c.tdeActive && c.tdeStats) {
             const tde::TdeStats& st = *c.tdeStats;
             const double sPerM = units::secondsPerM(s.bhMassSolar);
-            const char* phase = st.swallowedWhole ? "falling in whole"
-                              : !st.released ? "approaching"
-                              : st.accretedFraction > 0.02 ? "feeding the black hole"
-                              : st.boundFraction > 0.0 ? "torn into a stream" : "being torn apart";
-            ImGui::Text("%s, %s after spawn", phase, units::formatDuration(st.timeM * sPerM).c_str());
+            static const char* phases[] = {
+                "",
+                "Falling in: the black hole is pulling the star in.",
+                "Being torn apart by the tides!",
+                "Torn into a long stream: half the gas escapes, the other half is bound and falls back in about half a minute.",
+                "Falling back: the debris crashes into itself and wraps the black hole in hot gas.",
+                "Swallowed whole: this black hole is too big to tear this star apart (try a red giant, or Sagittarius A*).",
+            };
+            ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", phases[std::clamp(c.tdePhase, 0, 5)]);
+            ImGui::Text("%s after spawn   event clock: 1 s = %s", units::formatDuration(st.timeM * sPerM).c_str(),
+                        units::formatDuration(c.tdeWarp).c_str());
             ImGui::Text("bound %.0f%%   eaten %.1f%%   escaping %.0f%%   particles %d", 100.0 * st.boundFraction,
                         100.0 * st.accretedFraction, 100.0 * st.escapedFraction, st.activeParticles);
-            ImGui::ProgressBar(static_cast<float>(std::min(1.0, st.dissipationRel)), ImVec2(-1.0f, 0.0f), "flare");
-            if (st.limited) ImGui::TextDisabled("simulation running slower than the time warp asks (cost cap)");
+            ImGui::ProgressBar(static_cast<float>(std::min(1.0, st.dissipationRel)), ImVec2(-1.0f, 0.0f), "collision heating");
+            if (c.diskHidden) ImGui::TextDisabled("The steady accretion disk is hidden during the event: Clear brings it back.");
+            ImGui::TextDisabled("The planets keep your own time warp; only the event runs faster.");
         }
         sliderLog("Gas brightness", &s.gasBrightness, 0.5f, 200.0f);
         sliderLog("Gas opacity", &s.gasOpacity, 0.05f, 20.0f);
@@ -448,11 +479,14 @@ void Ui::draw(UiContext& c) {
 
     // ---- travel ----
     if (ImGui::CollapsingHeader("Travel", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::Button("Black hole")) *c.goToRequest = "black hole";
+        if (ImGui::Button("Black hole##travel")) *c.goToRequest = "black hole";
         if (c.bodies) {
+            int bi = 0;
             for (const BodyDesc& b : *c.bodies) {
                 ImGui::SameLine();
+                ImGui::PushID(bi++);   // body names (e.g. "Star") must not collide with other controls
                 if (ImGui::Button(b.name.c_str())) *c.goToRequest = b.name;
+                ImGui::PopID();
             }
         }
         if (c.uniTargets && !c.uniTargets->empty()) {
@@ -536,7 +570,7 @@ void Ui::draw(UiContext& c) {
         ImGui::SliderFloat("Noise scale", &s.diskNoiseScale, 0.25f, 4.0f, "%.2f");
         ImGui::SliderFloat("Noise strength", &s.diskNoiseStrength, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Rotation speed", &s.diskSpeed, 0.0f, 10.0f, "%.2f");
-        if (s.diskSpeed > 0.0f) ImGui::TextDisabled("inner edge goes round every %.1f s", 2.0 * 3.14159265 * std::pow(6.0, 1.5) / (10.0 * s.diskSpeed));
+        if (s.diskSpeed > 0.0f) ImGui::TextDisabled("inner edge goes round every %.1f s", 2.0 * 3.14159265 * std::pow(6.0, 1.5) / (kDiskFlowRate * s.diskSpeed));
         ImGui::SliderFloat("Warm tint", &s.diskWarmth, 0.0f, 1.0f, "%.2f");
         ImGui::Checkbox("Pause disk (P)", &s.paused);
     }

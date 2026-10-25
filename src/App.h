@@ -137,7 +137,9 @@ private:
     double simTime_ = 0.0;
     double diskClock_ = 0.0;
     double fixedDt_ = 0.0;               // --dt: fixed frame time for reproducible captures
-    double userWarp_ = -1.0;             // the user's time warp while a star disruption's auto warp runs (-1: none)
+    double tdeWarp_ = 0.0;               // the star disruption's own clock while its auto warp runs (0: none)
+    double swallowedAt_ = -1.0;          // real time when a star swallowed whole was gone (auto clear)
+    int tdePhase() const;                // see UiContext::tdePhase
     void saveSettings();                 // saves settings with the user's own time warp
     float diskFade_ = 1.0f;              // the steady disk fades out while a star disruption plays
     int watchPhase_ = 0;                 // star disruption camera: 0 off, 1 riding with the star, 2 pulled back

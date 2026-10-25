@@ -5,6 +5,9 @@
 namespace bhs {
 
 enum DiskMode : int { DISK_NONE = 0, DISK_THIN = 1, DISK_VOLUMETRIC = 2 };
+// Disk flow: M of orbital motion per second at rotation speed 1 (the inner edge, period 2 pi 6^1.5 M,
+// goes round in about 6 s).
+inline constexpr double kDiskFlowRate = 16.0;
 enum TonemapMode : int { TONEMAP_AGX = 0, TONEMAP_ACES = 1, TONEMAP_REINHARD = 2, TONEMAP_NONE = 3 };
 enum Preset : int { PRESET_LOW = 0, PRESET_MEDIUM = 1, PRESET_HIGH = 2, PRESET_ULTRA = 3, PRESET_CUSTOM = 4 };
 

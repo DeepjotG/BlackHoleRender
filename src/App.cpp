@@ -255,7 +255,7 @@ int App::run(const Options& opt) {
     if (opt.placement >= 0) settings_.realPlacement = opt.placement;
     debugView_ = opt.debugView;
     simTime_ = opt.startTime;
-    diskClock_ = std::fmod(opt.startTime * settings_.diskSpeed * 10.0, 60.0);
+    diskClock_ = std::fmod(opt.startTime * settings_.diskSpeed * kDiskFlowRate, 60.0);
 
     if (!initWindow()) return 1;
     // First interactive run without the NVIDIA driver: start on Medium so it stays smooth. The
@@ -416,10 +416,9 @@ void App::frame() {
     gatherInput(in);
     if (!settings_.paused) {
         simTime_ += dt;
-        // Disk flow: 10 M of orbital motion per second at speed 1, so the inner edge (period 2 pi 6^1.5 M)
-        // goes round in about 9 s and the outer disk in about a minute.
-        constexpr double kDiskBaseRate = 10.0, kDiskClockPeriod = 60.0;
-        diskClock_ = std::fmod(diskClock_ + static_cast<double>(dt) * settings_.diskSpeed * kDiskBaseRate, kDiskClockPeriod);
+        // Disk flow: kDiskFlowRate M of orbital motion per second at speed 1 (Settings.h).
+        constexpr double kDiskClockPeriod = 60.0;   // the disk shader's cross-fade period
+        diskClock_ = std::fmod(diskClock_ + static_cast<double>(dt) * settings_.diskSpeed * kDiskFlowRate, kDiskClockPeriod);
     }
     updateWorld(dt, in);
 
@@ -563,6 +562,9 @@ void App::frame() {
         ctx.tde = &tdeCtl_;
         ctx.tdeStats = &tde_.stats();
         ctx.tdeActive = tde_.active();
+        ctx.tdePhase = tdePhase();
+        ctx.tdeWarp = tdeWarp_ > 0.0 ? tdeWarp_ : settings_.timeWarp;
+        ctx.diskHidden = tde_.active() && !tdeCtl_.keepDisk;
         ctx.uniTargets = &universe_.targets();
         ctx.universeStatus = universe_.status().c_str();
         ctx.universeError = universeError_.c_str();
@@ -755,10 +757,17 @@ void App::buildBodies() {
 }
 
 void App::saveSettings() {
-    // A star disruption's auto time warp (up to millions x) must not become the next session's warp.
-    Settings out = settings_;
-    if (userWarp_ >= 0.0) out.timeWarp = userWarp_;
-    out.save(opt_.settingsPath);
+    // settings_.timeWarp is always the user's own warp (a star disruption runs on its own clock).
+    settings_.save(opt_.settingsPath);
+}
+
+int App::tdePhase() const {
+    if (!tde_.active()) return 0;
+    const tde::TdeStats& st = tde_.stats();
+    if (st.swallowedWhole) return 5;
+    if (!st.released) return 1;
+    if (st.accretedFraction > 1e-3) return 4;
+    return glm::dot(tde_.starPosition(), tde_.starVelocity()) > 0.0 ? 3 : 2;
 }
 
 void App::applyUniverseSettings() {
@@ -786,6 +795,9 @@ void App::updateTde(double dtM) {
     }
     if (tdeCtl_.spawnRequested) {
         tdeCtl_.spawnRequested = false;
+        // A selected scenario is played exactly as described, including its black hole.
+        if (tdeCtl_.scenario >= 0 && tdeCtl_.scenario < kTdeScenarioCount) settings_.bhMassSolar = tdeCtl_.applyScenario(tdeCtl_.scenario);
+        swallowedAt_ = -1.0;
         tde::StarParams sp;
         sp.massSolar = tdeCtl_.massSolar;
         sp.radiusSolar = tdeCtl_.radiusSolar;
@@ -825,23 +837,36 @@ void App::updateTde(double dtM) {
         watchPeriM_ = std::max(tde_.stats().pericenterM, 2.5);
     }
     if (!tde_.active()) {
-        if (userWarp_ >= 0.0) {   // the event is over: back to the user's own time warp
-            settings_.timeWarp = userWarp_;
-            userWarp_ = -1.0;
-        }
+        tdeWarp_ = 0.0;
         return;
     }
+    // A star swallowed whole leaves nothing to watch: end the event a few seconds after it is gone, so the
+    // steady disk comes back.
+    if (tde_.stats().swallowedWhole && tde_.stats().accretedFraction > 0.99) {
+        const double now = glfwGetTime();
+        if (swallowedAt_ < 0.0) swallowedAt_ = now;
+        if (now - swallowedAt_ > 4.0) {
+            tde_.clear();
+            swallowedAt_ = -1.0;
+            tdeWarp_ = 0.0;
+            return;
+        }
+    }
     if (tdeCtl_.autoWarp) {
-        if (userWarp_ < 0.0) userWarp_ = settings_.timeWarp;
         // Keep the event moving at a watchable pace: about 1/15 of the local dynamical time per
         // second while the star falls in, growing with the age of the debris afterwards.
         const tde::TdeStats& st = tde_.stats();
         // (At least 6 M: a star swallowed whole would otherwise crawl the last few M to the horizon.) After
-        // release the clock speeds up 20% per second until the debris falls back.
+        // release the clock speeds up 35% per second until the debris falls back. This is the event's own
+        // clock: the planets, the sky and the saved settings keep the user's time warp.
         const double r = std::max(tde_.starIntact() ? glm::length(tde_.starPosition()) : st.pericenterM, 6.0);
         const double tdyn = std::pow(r, 1.5);
-        const double perSecondM = std::max(tdyn / 15.0, (st.released ? 0.2 * st.timeM : 0.0));
-        settings_.timeWarp = std::clamp(perSecondM * units::secondsPerM(settings_.bhMassSolar), 1e-3, 1e11);
+        double perSecondM = std::max(tdyn / (st.swallowedWhole ? 6.0 : 15.0), (st.released ? 0.35 * st.timeM : 0.0));
+        // A star swallowed whole crawls the last few M: in coordinate time it all but freezes at the horizon.
+        if (st.swallowedWhole && glm::length(tde_.starPosition()) < 4.0) perSecondM = std::max(perSecondM, 40.0);
+        tdeWarp_ = std::clamp(perSecondM * units::secondsPerM(settings_.bhMassSolar), 1e-3, 1e11);
+    } else {
+        tdeWarp_ = 0.0;
     }
     tde_.step(dtM);
 }
@@ -861,6 +886,11 @@ void App::updateWorld(float dt, const Camera::Input& in) {
             q = comma + 1;
         }
     }
+    // Test hook: BHS_SPAWN_AT=frame presses "Spawn star" with whatever the panel currently holds.
+    if (const char* sp = std::getenv("BHS_SPAWN_AT"))
+        if (std::atoi(sp) == frameIndex_) tdeCtl_.spawnRequested = true;
+    if (const char* cl = std::getenv("BHS_CLEAR_AT"))   // ... and BHS_CLEAR_AT=frame presses "Clear"
+        if (std::atoi(cl) == frameIndex_) tdeCtl_.clearRequested = true;
     static bool fetchAuto = std::getenv("BHS_FETCH_CATALOG") != nullptr;   // test hook: press the button at start
     if (fetchAuto && settings_.universeMode == 2) {
         fetchAuto = false;
@@ -877,21 +907,24 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     }
     applyUniverseSettings();
     // Simulated time: the warp sets how many seconds pass per real second.
+    // Two clocks: the world (planets, sky, date) runs at the user's warp; a star disruption may run on
+    // its own, faster clock (auto warp) so the event stays watchable without the planets racing around.
+    const double sPerMNow = units::secondsPerM(settings_.bhMassSolar);
     const double dtSim = settings_.paused ? 0.0 : settings_.timeWarp * static_cast<double>(dt);
+    const double dtEvent = settings_.paused ? 0.0 : (tdeWarp_ > 0.0 ? tdeWarp_ : settings_.timeWarp) * static_cast<double>(dt);
     simSeconds_ += dtSim;
-    const double dtM = dtSim / units::secondsPerM(settings_.bhMassSolar);
-    bhSystem_.update(dtM);
-    updateTde(dtM);
+    bhSystem_.update(dtSim / sPerMNow);
+    updateTde(dtEvent / sPerMNow);
     buildBodies();
 
     if (tde_.active() && std::getenv("BHS_DEBUG_TDE")) {
         static int frameNo = 0;
         if (++frameNo % 30 == 0) {
             const tde::TdeStats& st = tde_.stats();
-            logInfo("tde t={:.3g} M star r={:.3g} M intact={} released={} watch={} cam r={:.3g} M to star {:.3g} M volumes={} warp={:.3g}",
-                    st.timeM, glm::length(tde_.starPosition()), tde_.starIntact(), st.released, watchPhase_,
+            logInfo("tde t={:.3g} M phase {} star r={:.3g} M intact={} released={} watch={} cam r={:.3g} M to star {:.3g} M volumes={} world warp={:.3g} event warp={:.3g}",
+                    st.timeM, tdePhase(), glm::length(tde_.starPosition()), tde_.starIntact(), st.released, watchPhase_,
                     glm::length(camera_.position()), glm::length(camera_.position() - tde_.starPosition()), tde_.volumeCount(),
-                    settings_.timeWarp);
+                    settings_.timeWarp, tdeWarp_);
             {
                 const glm::dvec3 rel = tde_.starPosition() - camera_.position();
                 const glm::dvec3 back(camera_.basis()[2]);
@@ -975,20 +1008,16 @@ void App::updateWorld(float dt, const Camera::Input& in) {
             const tde::TdeStats& st = tde_.stats();
             const double r = glm::length(p);
             const bool leaving = glm::dot(p, tde_.starVelocity()) > 0.0;
-            if ((st.released && leaving && r > 1.6 * watchPeriM_) || (st.swallowedWhole && r < 3.0)) {
+            if ((st.released && leaving && r > 1.6 * watchPeriM_) || (st.swallowedWhole && r < 4.0)) {
                 const double D = std::max(30.0, 3.0 * watchPeriM_);
                 const glm::dvec3 from = glm::length(camera_.position()) > 0.0 ? glm::normalize(camera_.position()) : glm::dvec3(0, 0, 1);
                 camera_.flyToTarget(glm::dvec3(0.0), D, from);
                 watchPhase_ = 2;
             }
         } else if (watchPhase_ == 2 && !camera_.isTransitioning()) {
-            // Keep the debris in frame from outside: dolly along the line of sight to about 1.2x the
-            // debris' distance from the hole while the stream flies away; once the bound debris falls back
-            // (accretion or stream-collision heating), come in close to watch the new disk form.
-            const tde::TdeStats& st = tde_.stats();
-            const bool fallback = st.accretedFraction > 1e-3 || st.dissipationRel > 0.05;
-            const double target = fallback ? std::max(30.0, 6.0 * watchPeriM_)
-                                           : std::clamp(1.2 * glm::length(tde_.starPosition()), 3.0 * watchPeriM_, 3e5);
+            // Hold a view of the black hole where the action is: the stream leaving and, later, the bound
+            // debris falling back and wrapping the hole (never chase the escaping half out into the dark).
+            const double target = std::max(30.0, 5.5 * watchPeriM_);
             const double d = glm::length(camera_.position());
             if (d > 0.0) {
                 const double f = std::pow(target / d, std::min(1.0, 1.2 * static_cast<double>(dt)));
