@@ -30,6 +30,9 @@ struct BodyDesc {
     glm::vec3 lightColor{1.0f};
     float lightIntensity = 1.0f;         // planets: irradiance scale; stars: surface brightness scale
     float teff = 5772.0f;                // stars
+    float turbulence = 0.0f;             // stars: > 0 an exploding photosphere (0..1: plume contrast); `atmosphere` its plumes per radius
+    float phase = 0.0f;                  // stars: the exploding photosphere's pattern, advanced by the event's clock
+    float opacity = 1.0f;                // below 1: a photosphere turning transparent (what is behind and inside shows)
     double ringInner = 0.0, ringOuter = 0.0;  // M
     bool collidable = true;
     std::string info;                    // one-line description for the travel panel

@@ -19,7 +19,7 @@ constexpr int kLensPhis = 1024;
 constexpr GLsizeiptr kHashSlots = GLsizeiptr(1) << 22;
 constexpr GLsizeiptr kMomSlots = GLsizeiptr(1) << 19;
 constexpr GLsizeiptr kMomWords = 10;
-constexpr GLsizeiptr kSplatBytes = 48;
+constexpr GLsizeiptr kSplatBytes = 64;
 constexpr int kReturnBins = 160;            // 1/16 decade each, from 1 M
 struct CmdBlock {
     GLuint count, instances, first, base;   // glDrawArraysIndirect
@@ -140,9 +140,10 @@ void GasParticleRenderer::ensureTargets(int w, int h) {
     if (revealTex_) glDeleteTextures(1, &revealTex_);
     fw_ = w;
     fh_ = h;
-    // 32-bit accumulation: thousands of overlapping splats would overflow half floats in dense gas.
+    // Half floats: the overdraw is bounded to a few dozen layers, and the bandwidth of the blending is
+    // what the draw pass costs.
     glCreateTextures(GL_TEXTURE_2D, 1, &accumTex_);
-    glTextureStorage2D(accumTex_, 1, GL_RGBA32F, w, h);
+    glTextureStorage2D(accumTex_, 1, GL_RGBA16F, w, h);
     glCreateTextures(GL_TEXTURE_2D, 1, &revealTex_);
     glTextureStorage2D(revealTex_, 1, GL_R16F, w, h);
     for (GLuint t : {accumTex_, revealTex_}) {
@@ -306,8 +307,13 @@ void GasParticleRenderer::draw(const GasParticlesRef& gas, const GasDrawParams& 
     splatProg_.set("uGasOpacity", view.opacity);
     splatProg_.set("uRefLen", gas.refLen);
     splatProg_.set("uGasLaw", gas.law);
-    splatProg_.set("uLawCentre", gas.centre);
+    splatProg_.set("uLawOrigin", glm::vec3(gas.origin));
+    splatProg_.set("uOriginRel", glm::vec3(gas.origin - view.camPosD));
+    splatProg_.set("uFlow", gas.flowM);
+    splatProg_.set("uNoiseMod", gas.noiseMod);
     splatProg_.set("uDiskFade", glm::vec3(view.diskOuter, view.diskSlab, view.diskPresence));
+    splatProg_.set("uBodyCount", view.bodies ? view.bodyCount : 0);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, view.bodies);
     splatProg_.set("uMaxSplats", static_cast<unsigned>(splatCap_));
     splatProg_.set("uMaxExtent", 0.25f * static_cast<float>(h));
     splatProg_.set("uAreaBudget", 4.0f * static_cast<float>(w) * static_cast<float>(h));
@@ -331,6 +337,10 @@ void GasParticleRenderer::draw(const GasParticlesRef& gas, const GasDrawParams& 
     glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);
     drawProg_.use();
     drawProg_.set("uResolution", glm::vec2(w, h));
+    drawProg_.set("uNoise3d", 2);
+    drawProg_.set("uRight", glm::vec3(view.camBasis[0]));
+    drawProg_.set("uUp", glm::vec3(view.camBasis[1]));
+    glBindTextureUnit(2, view.noise3d);
     glBindVertexArray(vao_);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, cmd_[slot]);
     glDrawArraysIndirect(GL_TRIANGLE_STRIP, nullptr);
@@ -351,9 +361,10 @@ void GasParticleRenderer::draw(const GasParticlesRef& gas, const GasDrawParams& 
     glBlendFunc(GL_ONE, GL_ZERO);
 
     glBindBufferBase(GL_UNIFORM_BUFFER, 3, 0);
-    for (GLuint b : {0u, 1u, 2u, 9u, 10u, 11u, 12u, 13u, 14u, 16u}) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, b, 0);
+    for (GLuint b : {0u, 1u, 2u, 3u, 9u, 10u, 11u, 12u, 13u, 14u, 16u}) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, b, 0);
     glBindTextureUnit(0, 0);
     glBindTextureUnit(1, 0);
+    glBindTextureUnit(2, 0);
     glBindVertexArray(0);
     mark();   // 7 resolve
     if (timing && ++timedFrames % 120 == 0) {

@@ -1,10 +1,12 @@
 #version 460 core
 // Places the particles of a neutron-star merger's aftermath (src/grb/GrbEvent.cpp) for the gas splat
-// renderer (gas_splat.comp, law 1): the kilonova shell expanding homologously from the merger point, and
-// the twin jets (a bright narrow core inside a slower, wider cocoon) along their spines. Every particle
-// has a fixed seed (its index), so the pattern expands with the flow instead of boiling.
-// Output: pPos (xyz, w = 0 active), pVel (xyz, w = 0), pAux (x optical depth through the splat's centre,
-// y emission multiplier, z temperature / 1e4 K, w noise scale in M, negative for the jets).
+// renderer (gas_splat.comp, law 1), relative to the ejecta's centre: the wisps of the kilonova's outer
+// layer (its photosphere itself is a body), the twin jets (a bright narrow core inside a slower, wider
+// cocoon) along their spines, and the afterglow haloes round the jets' heads. Every particle has a
+// fixed seed (its index), so the pattern expands with the flow instead of boiling.
+// Output: pPos (xyz relative to the centre, w = 0 active / 3 unused), pVel (xyz: the direction of motion,
+// its length above 1 stretching the kernel along it; w: kernel radius in M), pAux (x optical depth through the splat's centre, y emission multiplier, z temperature /
+// 1e4 K, w noise scale in M, negative for the jets: their noise flows outward along them).
 layout(local_size_x = 256) in;
 #include "common.glsl"
 
@@ -12,19 +14,21 @@ layout(std430, binding = 0) writeonly buffer PartPos { vec4 pPos[]; };
 layout(std430, binding = 1) writeonly buffer PartVel { vec4 pVel[]; };
 layout(std430, binding = 2) writeonly buffer PartAux { vec4 pAux[]; };
 const int SPINE = 64;
-layout(std430, binding = 15) readonly buffer Spines { vec4 sSpine[]; };   // [2][SPINE]: xyz, w = path length
+layout(std430, binding = 15) readonly buffer Spines { vec4 sSpine[]; };   // [2][SPINE]: xyz relative to the merger site, w = path length
 
-uniform int uCountKn, uCountJet;          // kilonova particles; particles per jet (core + cocoon)
+uniform int uCountWisp, uCountJet, uCountHalo;   // wisps; particles per jet (core + cocoon); haloes per jet
 uniform int uCoreCount;                   // the first this many of each jet are the core
-uniform vec3 uCentre;                     // of the ejecta
-uniform vec4 uKn;                         // radius (M), shell fraction, optical depth per particle, emission
+uniform vec3 uSiteOffset;                 // the merger site relative to the ejecta's centre (the jets launched from the site)
+uniform vec4 uKn;                         // kilonova radius (M), wisp optical depth per particle, wisp emission, wisp kernel radius (M)
 uniform vec2 uKnTemp;                     // polar, equatorial (/1e4 K)
-uniform vec3 uAxis;                       // the jets' axis (for the kilonova's polar / equatorial split)
+uniform vec3 uAxis;                       // the jets' axis
 uniform vec4 uHeads;                      // jet 0 head, cocoon 0 head, jet 1 head, cocoon 1 head (path length, M; 0: not launched)
 uniform vec4 uJet;                        // cos(core half-angle), cos(cocoon half-angle), tau per core particle, per cocoon particle
 uniform vec2 uJetTemp;                    // core, cocoon (/1e4 K)
 uniform vec2 uJetBright;                  // core, cocoon
-uniform float uEjectaSpeed;               // c
+const float kCoreStretch = 2.2, kCocoonStretch = 1.5;   // the jets' splats drawn out along them (GrbEvent.cpp)
+uniform vec3 uJetKernel;                  // kernel radius / local width: core, cocoon; noise scale / head width
+uniform vec4 uHalo;                       // radius / head distance, tau per particle, emission, kernel radius / halo radius
 
 vec3 spineAt(int which, float len, out vec3 tangent) {
     float f = clamp(len / max(sSpine[which * SPINE + SPINE - 1].w, 1e-9), 0.0, 1.0) * float(SPINE - 1);
@@ -35,59 +39,85 @@ vec3 spineAt(int which, float len, out vec3 tangent) {
     return mix(a, b, t);
 }
 
+vec3 sphereDir(vec2 r) {
+    float z = 2.0 * r.x - 1.0;
+    float ph = TWO_PI * r.y;
+    float s = sqrt(max(1.0 - z * z, 0.0));
+    return vec3(s * cos(ph), s * sin(ph), z);
+}
+
 void main() {
     int i = int(gl_GlobalInvocationID.x);
-    int total = uCountKn + 2 * uCountJet;
+    int total = uCountWisp + 2 * uCountJet + 2 * uCountHalo;
     if (i >= total) return;
     vec3 rnd = hash3u(uvec3(uint(i), 0x9E3779B9u, 0x7F4A7C15u));
     vec3 rnd2 = hash3u(uvec3(uint(i), 0x85EBCA6Bu, 0xC2B2AE35u));
-    vec4 pos = vec4(0.0), vel = vec4(0.0), aux = vec4(0.0);
-    if (i < uCountKn) {
-        // The shell: uniform in volume between (1 - f) R and R, a polar / equatorial split in temperature
-        // and speed (the equatorial ejecta are slower, denser and redder).
+    vec4 pos = vec4(0.0, 0.0, 0.0, 3.0), vel = vec4(0.0), aux = vec4(0.0);
+    if (i < uCountWisp) {
+        // The kilonova's ragged outer layer, just beyond its photosphere: fingers of ejecta in clumps (a
+        // comoving noise on the sphere), densest at the surface, thinning outwards; the polar ejecta hotter
+        // and faster than the equatorial.
         float R = uKn.x;
-        if (R <= 0.0) { pPos[i] = vec4(0.0, 0.0, 0.0, 3.0); return; }   // state 3: unused
-        float z = 2.0 * rnd.x - 1.0;
-        float ph = TWO_PI * rnd.y;
-        float s = sqrt(max(1.0 - z * z, 0.0));
-        vec3 dir = vec3(s * cos(ph), s * sin(ph), z);
-        // dir is in a frame whose z is the axis: rotate it so that (0, 0, 1) -> uAxis.
-        vec3 ax = normalize(uAxis);
-        vec3 t1 = normalize(cross(ax, abs(ax.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-        vec3 t2 = cross(ax, t1);
-        vec3 d = dir.x * t1 + dir.y * t2 + dir.z * ax;
-        float polar = smoothstep(0.35, 0.8, abs(dir.z));
-        float speed = mix(0.8, 1.0, polar);          // of the polar ejecta speed: mildly oblate
-        float rin = (1.0 - uKn.y) * R;
-        float r = pow(mix(rin * rin * rin, R * R * R, rnd.z), 1.0 / 3.0) * speed;
-        pos = vec4(uCentre + d * r, 0.0);
-        vel = vec4(d * (uEjectaSpeed * speed * r / max(R, 1e-30)), 0.0);
-        float T = mix(uKnTemp.y, uKnTemp.x, polar) * (0.94 + 0.12 * rnd2.x);
-        aux = vec4(uKn.z, uKn.w * (0.8 + 0.4 * rnd2.y), T, 0.3 * R);
-    } else {
-        int j = i - uCountKn;
+        if (R > 0.0) {
+            vec3 ax = normalize(uAxis);
+            vec3 t1 = normalize(cross(ax, abs(ax.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+            vec3 t2 = cross(ax, t1);
+            vec3 dir = sphereDir(rnd.xy);
+            vec3 d = dir.x * t1 + dir.y * t2 + dir.z * ax;
+            float polar = smoothstep(0.35, 0.8, abs(dir.z));
+            float clump = fbm3(dir * 3.0 + vec3(1.3), 3, 0.55, 61u);
+            if (clump > -0.1) {
+                float reach = (0.05 + 0.25 * smoothstep(-0.1, 0.45, clump)) * mix(0.7, 1.4, polar);   // the poles faster
+                float f = pow(rnd.z, 1.3);   // denser near the surface
+                pos = vec4(d * (R * (1.0 + reach * f)), 0.0);
+                vel = vec4(d * (1.0 + 1.6 * smoothstep(0.0, 0.5, clump)), uKn.w);
+                float T = mix(uKnTemp.y, uKnTemp.x, polar) * (0.9 + 0.1 * rnd2.x - 0.1 * f);
+                float fade = 1.0 - 0.7 * f;   // thinner and cooler outward
+                aux = vec4(uKn.y * fade, uKn.z * fade * (0.6 + 0.8 * rnd2.y), T, 0.15 * R);
+            }
+        }
+    } else if (i < uCountWisp + 2 * uCountJet) {
+        int j = i - uCountWisp;
         int which = j / uCountJet;
         int k = j - which * uCountJet;
         bool core = k < uCoreCount;
         float head = which == 0 ? (core ? uHeads.x : uHeads.y) : (core ? uHeads.z : uHeads.w);
-        if (head <= 0.0) { pPos[i] = vec4(0.0, 0.0, 0.0, 3.0); return; }
-        // Along the spine: denser towards the head (the forward shock); within the cone: uniform in solid angle.
-        float s = core ? pow(rnd.x, 0.6) : pow(rnd.x, 0.8);
-        float cosMax = core ? uJet.x : uJet.y;
-        float cosT = 1.0 - rnd.y * (1.0 - cosMax);
-        float sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
-        float ph = TWO_PI * rnd.z;
-        vec3 tangent;
-        vec3 c = spineAt(which, s * head * cosT, tangent);
-        vec3 n1 = normalize(cross(tangent, abs(tangent.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-        vec3 n2 = cross(tangent, n1);
-        float lateral = s * head * sinT;
-        pos = vec4(c + lateral * (cos(ph) * n1 + sin(ph) * n2), 0.0);
-        vel = vec4(tangent * (core ? 1.0 : 0.6), 0.0);
-        float bump = 1.0 + (core ? 3.0 : 1.0) * exp(-(1.0 - s) / 0.12);   // the shock at the head
-        float width = max(s * head * sqrt(1.0 - cosMax * cosMax), 1e-9);
-        aux = vec4(core ? uJet.z : uJet.w, (core ? uJetBright.x : uJetBright.y) * bump * (0.8 + 0.4 * rnd2.x),
-                   (core ? uJetTemp.x : uJetTemp.y) * (0.95 + 0.1 * rnd2.y), -0.5 * width);   // < 0: a jet, not the shell
+        if (head > 0.0) {
+            // Along the spine: denser towards the head (the forward shock); within the cone: uniform in solid
+            // angle. The material glows brightest at the head and near the engine.
+            float s = pow(rnd.x, 0.75);
+            float cosMax = core ? uJet.x : uJet.y;
+            float cosT = 1.0 - rnd.y * rnd.y * (1.0 - cosMax);   // concentrated on the axis
+            float sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
+            float ph = TWO_PI * rnd.z;
+            vec3 tangent;
+            vec3 c = spineAt(which, s * head * cosT, tangent);
+            vec3 n1 = normalize(cross(tangent, abs(tangent.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+            vec3 n2 = cross(tangent, n1);
+            float sinMax = sqrt(max(1.0 - cosMax * cosMax, 0.0));
+            float width = max(s * head * sinMax, 1e-9);
+            float lateral = s * head * sinT;
+            pos = vec4(c + lateral * (cos(ph) * n1 + sin(ph) * n2) + uSiteOffset, 0.0);
+            vel = vec4(tangent * (core ? kCoreStretch : kCocoonStretch), max((core ? uJetKernel.x : uJetKernel.y) * width, 1e-9));
+            float bump = core ? 1.0 + 3.0 * exp(-(1.0 - s) / 0.1) + 1.5 * exp(-s / 0.08) : 1.0 + 0.5 * exp(-(1.0 - s) / 0.15);
+            aux = vec4(core ? uJet.z : uJet.w, (core ? uJetBright.x : uJetBright.y) * bump * (0.7 + 0.6 * rnd2.x),
+                       (core ? uJetTemp.x : uJetTemp.y) * (0.95 + 0.1 * rnd2.y), -max(uJetKernel.z * head * sinMax, 1e-9));
+        }
+    } else {
+        int j = i - uCountWisp - 2 * uCountJet;
+        int which = j / uCountHalo;
+        float head = which == 0 ? uHeads.x : uHeads.z;
+        if (head > 0.0) {
+            // The afterglow: a soft glow round the jet's head where it ploughs into its surroundings.
+            vec3 tangent;
+            vec3 c = spineAt(which, head, tangent) + uSiteOffset;
+            float radius = max(uHalo.x * head, 1e-9);
+            vec3 d = sphereDir(rnd.xy);
+            float r = radius * pow(rnd.z, 0.4);
+            pos = vec4(c + d * r, 0.0);
+            vel = vec4(tangent * 0.9, uHalo.w * radius);
+            aux = vec4(uHalo.y, uHalo.z * (0.7 + 0.6 * rnd2.x), 2.0, 2.0 * radius);
+        }
     }
     pPos[i] = pos;
     pVel[i] = vel;

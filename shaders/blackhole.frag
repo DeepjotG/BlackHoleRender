@@ -253,7 +253,9 @@ void main() {
     }
 
 #if BHS_BODIES
-    // ---- Shade the body hit by the march.
+    // ---- Shade the body hit by the march. A photosphere turning transparent (opacity below 1) lets the
+    // ray on, straight from there, past that body.
+    uint seenMask = 0u;
     if (status == 4 && hitBody >= 0) {
         Body bd = bodies[hitBody];
         vec3 ro = hitRo, rd = hitRd, c = bd.posRadius.xyz;
@@ -261,15 +263,23 @@ void main() {
         if (hitBody == nearIdx && travelled + nearTol >= nearT) { ro = vec3(0.0); rd = rdNear; c = bd.relPos.xyz; t = nearT; }
         vec3 n = normalize(ro + rd * t - c);
         gSurfaceLod = gFootprint * t / bd.posRadius.w / max(dot(n, -rd), 0.08);
-        color += transmittance * shadeBodySurface(bd, n, rd);
-        transmittance = 0.0;
+        float op = clamp(bd.ring.w, 0.0, 1.0);
+        color += transmittance * op * shadeBodySurface(bd, n, rd);
+        transmittance *= 1.0 - op;
+        if (transmittance > 0.004) {
+            status = 1;
+            escDir = rd;
+            seenMask = 1u << uint(hitBody);
+        } else {
+            transmittance = 0.0;
+        }
     }
     // ---- Straight stretches: everything in far mode; after escape, the near-field body (which lies
     // beyond the escape point) and the other bodies along the escaped ray.
     if (status == 1) {
-        vec4 layer = uFarMode != 0 ? nearestBodyStraight(vec3(0.0), dir, true, 0u, 1e30)
-                                   : nearestBodyStraight(vec3(0.0), rdNear, true, ~nearMask, 1e30);
-        if (uFarMode == 0 && layer.a <= 0.0) layer = nearestBodyStraight(x, escDir, false, nearMask, 1e30);
+        vec4 layer = uFarMode != 0 ? nearestBodyStraight(vec3(0.0), dir, true, seenMask, 1e30)
+                                   : nearestBodyStraight(vec3(0.0), rdNear, true, ~nearMask | seenMask, 1e30);
+        if (uFarMode == 0 && layer.a <= 0.0) layer = nearestBodyStraight(x, escDir, false, nearMask | seenMask, 1e30);
         if (composite(layer, color, transmittance)) status = 4;
     }
     // ---- Atmosphere and corona halos around near-field bodies the ray just missed.

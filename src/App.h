@@ -16,6 +16,9 @@
 #include "GrbControls.h"
 #include "grb/GrbDirector.h"
 #include "grb/GrbEvent.h"
+#include "SnControls.h"
+#include "sn/SnDirector.h"
+#include "sn/SnEvent.h"
 #include "CatalogFetch.h"
 #include "UniverseScene.h"
 #include "tde/TdeSim.h"
@@ -49,6 +52,7 @@ struct Options {
     double startTime = 0.0;
     int tdeScenario = 0;        // --tde N: start star-disruption scenario N (1-based)
     int grbScenario = 0;             // --grb N: play neutron-star merger scenario N from the start
+    int snScenario = 0;              // --sn N: play supernova scenario N from the start
     double fixedDt = 0.0;       // --dt S: fixed frame time (reproducible animation captures)
     unsigned seed = 0;
     bool hasPos = false, hasTarget = false;
@@ -125,6 +129,14 @@ private:
     GasParticlesRef grbParticles_;
     double grbWarp_ = 0.0;              // the merger's own clock while its auto warp runs (0: none)
     void updateGrb(double dtM, double dtReal);
+    sn::SnEvent sn_;                    // the supernova (deep space)
+    SnControls snCtl_;
+    SnDirector snDirector_;
+    GasParticlesRef snParticles_;
+    double snWarp_ = 0.0;               // the supernova's own clock while its auto warp runs (0: none)
+    bool wasFarEvent_ = false;          // the supernova or the merger played last frame (their shots reach far out)
+    bool farEventCam_ = false;          // ... and its director had the camera
+    void updateSn(double dtM, double dtReal);
     std::vector<BodyDesc> bodies_;
     std::vector<BodyGpu> bodiesGpu_;
     double simSeconds_ = 0.0;            // simulated coordinate time since start (s)

@@ -124,6 +124,8 @@ add_executable(blackhole
   src/TdeDirector.cpp
   src/grb/GrbEvent.cpp
   src/grb/GrbDirector.cpp
+  src/sn/SnEvent.cpp
+  src/sn/SnDirector.cpp
   src/SkyBaker.cpp
   src/DiskTextures.cpp
   src/Ui.cpp
@@ -188,3 +190,6 @@ add_test(NAME tde_director_tests COMMAND tde_director_tests)
 add_executable(grb_tests tests/grb_tests.cpp)
 target_link_libraries(grb_tests PRIVATE bhs_core)
 add_test(NAME grb_tests COMMAND grb_tests)
+add_executable(sn_tests tests/sn_tests.cpp src/sn/SnDirector.cpp)
+target_link_libraries(sn_tests PRIVATE bhs_core)
+add_test(NAME sn_tests COMMAND sn_tests)

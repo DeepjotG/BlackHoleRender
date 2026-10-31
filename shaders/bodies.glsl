@@ -6,6 +6,8 @@
 // (emissive). Filled each frame by the app (src/Bodies.cpp). Positions:
 //   posRadius.xyz: centre relative to the black hole, renderer frame (M), used while marching
 //   relPos.xyz:    centre relative to the camera (M), precise even for tiny bodies close by
+//   tint.w, ring.z: stars: an exploding photosphere's turbulence (0: an ordinary star) and pattern phase
+//   ring.w:        opacity (1: solid; below, a photosphere turning transparent)
 
 struct Body {
     vec4 posRadius;   // xyz centre (black-hole relative), w radius (M)
@@ -228,6 +230,23 @@ vec3 shadeBodySurface(Body b, vec3 n, vec3 viewDir) {
         vec3 p = bodyLocal(b, n);
         uint seed = uint(b.look.y);
         float teff = b.lightColor.a;
+        if (b.tint.w > 0.0) {
+            // An exploding photosphere (tint.w: how turbulent, 0..1): a few big Rayleigh-Taylor plumes per
+            // radius (look.z), domain-warped, with hot bright heads and cool dark lanes between them, evolving
+            // with the event's own clock (ring.z) rather than real time; the limb darker and cooler.
+            float turb = b.tint.w, ph = b.ring.z;
+            vec3 q = p * max(b.look.z, 1.0);
+            vec3 warp = vec3(fbm3(q * 0.6 + vec3(0.0, 0.0, ph), 2, 0.5, seed + 11u), fbm3(q * 0.6 + vec3(5.2, 1.3, ph), 2, 0.5, seed + 13u),
+                             fbm3(q * 0.6 + vec3(9.1, 4.7, ph), 2, 0.5, seed + 17u));
+            float plume = fbm3(q + 1.8 * warp + vec3(0.0, 0.7 * ph, 0.0), 4, 0.55, seed);
+            float heads = smoothstep(-0.05, 0.45, plume);
+            float lanes = 1.0 - smoothstep(-0.45, -0.05, plume);
+            float limbX = 0.25 + 0.75 * pow(mu, 0.6);
+            float tLocalX = teff * (0.8 + 0.2 * pow(mu, 0.4)) * mix(1.0, 0.86 + 0.26 * heads - 0.08 * lanes, turb);
+            float IX = b.light.w * limbX * mix(1.0, (0.5 + 0.9 * heads) * (1.0 - 0.5 * lanes), turb);
+            vec3 baseX = blackbody(teff).rgb;
+            return blackbody(tLocalX).rgb * (IX / max(max(baseX.r, max(baseX.g, baseX.b)), 1e-3));
+        }
         float cool = clamp((7500.0 - teff) / 2500.0, 0.0, 1.0);
         float freq = b.look.z > 0.0 ? b.look.z : 70.0;               // convection cells per radius (look.z < 0: disrupted star)
         float tt = uTime * 0.02;
@@ -307,7 +326,8 @@ vec4 traceBody(Body b, vec3 c, vec3 ro, vec3 rd, float tMax, out float tHit) {
     if (ts > 0.0) {
         vec3 n = normalize(ro + rd * ts - c);
         gSurfaceLod = gFootprint * ts / R / max(dot(n, -rd), 0.08);
-        result = vec4(shadeBodySurface(b, n, rd), 1.0);
+        float op = clamp(b.ring.w, 0.0, 1.0);
+        result = vec4(shadeBodySurface(b, n, rd) * op, op);
         tHit = ts;
     }
     if (tr > 0.0) {

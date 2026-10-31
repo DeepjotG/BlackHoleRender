@@ -33,13 +33,13 @@ std::vector<BodyGpu> packBodies(const std::vector<BodyDesc>& bodies, const glm::
         g.posRadius = glm::vec4(glm::vec3(b.pos), static_cast<float>(b.radius));
         g.relPos = glm::vec4(glm::vec3(b.pos - camPos), b.kind == BodyKind::Star ? 1.0f : 0.0f);
         g.look = glm::vec4(static_cast<float>(static_cast<int>(b.look)), static_cast<float>(b.seed % 4096u), b.atmosphere, b.rotation);
-        g.tint = glm::vec4(b.tint, 0.0f);
+        g.tint = glm::vec4(b.tint, b.turbulence);
         const float ll = glm::length(b.lightDir);
         g.light = glm::vec4(ll > 0.0f ? b.lightDir / ll : glm::vec3(0, 1, 0), b.lightIntensity);
         g.lightColor = glm::vec4(b.lightColor, b.teff);
         const float al = glm::length(b.axis);
         g.axis = glm::vec4(al > 0.0f ? b.axis / al : glm::vec3(0, 1, 0), 0.0f);
-        g.ring = glm::vec4(static_cast<float>(b.ringInner), static_cast<float>(b.ringOuter), 0.0f, 0.0f);
+        g.ring = glm::vec4(static_cast<float>(b.ringInner), static_cast<float>(b.ringOuter), b.phase, std::clamp(b.opacity, 0.0f, 1.0f));
         out.push_back(g);
     }
     return out;

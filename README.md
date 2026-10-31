@@ -218,18 +218,54 @@ disruption, about two minutes long.
   spines follow light-like paths in the hole's gravity, so the one aimed a few degrees past the black
   hole is visibly bent around it (aimed straight at it, it falls in). The ejecta swell into a
   white-hot kilonova, the furnace that forges gold and platinum.
-* **The kilonova engulfs the black hole**: the jets fade into an afterglow while the still white-hot
-  cloud sweeps over the black hole and then the camera.
+* **The kilonova engulfs the black hole**: the jets fade into an afterglow while the still white-hot,
+  boiling cloud swells over the black hole until it fills most of the view.
 * **The days after** (time-lapse, from far out): the ejecta cool from white through yellow to red
   (AT2017gfo's colour evolution) and turn transparent over ten days, dispersing the gold and
   platinum they forged; then the event ends by itself.
 
 Scenarios set the black hole (yours comes back once the event is over), the binary's distance from
-it and the jet's aim; *Custom* keeps the current hole. The stars are drawn as lensed bodies; the
-kilonova shell and the jets are particles
-drawn by the same lensed splat renderer as the disruption's gas (their own opacity, temperature and
-glow laws); the steady accretion disk is unaffected. Command line: `--grb N` plays scenario N from
-the start.
+it and the jet's aim; *Custom* keeps the current hole. *Deep space, far from any black hole* plays
+the burst on its own, beyond the renderer's lensing (straight rays, no disk, just the sky), to see
+the effect itself; the camera flies home afterwards.
+
+The stars, the merger remnant and the kilonova's photosphere are drawn as lensed bodies: the
+photosphere is an exploding one, big Rayleigh-Taylor plumes boiling on the event's own clock with
+hot bright heads and cool dark lanes, limb-darkened at the ejecta's temperature, turning transparent
+as the ejecta thin out. The kilonova's ragged outer fingers, the jets with their cocoons and the
+afterglow haloes round the jets' heads are particles drawn by the same lensed splat renderer as the
+disruption's gas: each splat carries its own size (no jumps between density levels), is drawn out
+along its motion where it streams (the jets, the fingers), is textured per pixel by a 3D noise that
+expands with the ejecta and flows along the jets, and is hidden behind bodies with a soft edge, so
+the clouds are continuous rather than a pile of discs, and nothing pops. The steady accretion disk is
+unaffected. Command line: `--grb N` plays scenario N (1-4) from the start.
+
+## Supernova
+
+The *Supernova* panel blows up a star in deep space (far from the black hole, beyond its lensing),
+directed in five stages over about eighty seconds in one continuous shot, with the physics of a
+Type II supernova kept to what shows:
+
+* **A dying star**: a red supergiant of fifteen Suns, seven hundred times the Sun's width, boiling at
+  3,500 K (or a blue supergiant like SN 1987A's), watched in real time from a slow orbit.
+* **Core collapse** (time-lapse): the core collapses in a fraction of a second; the shock takes half a
+  day to climb the envelope, during which nothing shows outside.
+* **Shock breakout**: the whole surface flashes to the colour table's limit for about the star's
+  light-crossing time (half an hour) and starts to fly apart.
+* **The star blows apart** (time-lapse): the envelope expands at ten thousand kilometres a second,
+  a hundredfold in two months, plumes of hot gas boiling through its surface while fingers of the
+  fastest ejecta grow beyond it; it cools from blue-white onto the hydrogen-recombination plateau
+  near 5,000 K. The camera pulls back as it swells, slower than it does, so it grows to fill the frame.
+* **The remnant** (years in seconds): the envelope thins out and turns transparent, showing the
+  remnant inside: a limb-brightened shell of filaments and knots of the inner ejecta lit by the decay
+  of cobalt-56, in regions of hydrogen red, oxygen teal and sulphur orange, the forward shock's faint
+  blue rim at its edge, and the pulsar in its blue wind nebula at the centre. It expands and fades
+  over three years while the camera eases back to show it whole; then the event ends by itself and
+  the camera flies home.
+
+The star and its exploding photosphere are a body (the same boiling, transparent-turning photosphere
+as the kilonova's); the ejecta fingers and the remnant are particles in the splat renderer, every
+pattern comoving with the ejecta. Command line: `--sn N` plays scenario N (1-2) from the start.
 
 ## Controls
 
@@ -266,6 +302,7 @@ the start.
 --universe-seed N  --placement sgra|sun   invented universe seed; where the real black hole is
 --fov DEG                        vertical field of view
 --tde N                          start star-disruption scenario N (1-5, as listed in the panel)
+--grb N | --sn N                 start neutron-star merger scenario N (1-4) / supernova scenario N (1-2)
 --dt S                           fixed frame time in seconds (reproducible captures)
 --goto NAME | --fly NAME         start next to / fly to Miller, Mann, Edmunds, "black hole",
                                  "nearest star", or any star, galaxy or place in the Travel list
@@ -320,6 +357,8 @@ sphere stability, redshift closed forms, far-field correction).
 ```
 src/            application (App, Camera, Renderer, SkyBaker, DiskTextures, Ui, Capture)
 src/physics/    CPU copy of the geodesic math used by the tests
+src/tde/ src/grb/ src/sn/   the star disruption, the neutron-star merger and the supernova:
+                models (CPU), GPU particles, and the directors that pace and film them
 shaders/        GLSL: blackhole.frag (tracer), geodesic/disk/sky includes, bake and post passes
 tests/          physics unit checks (ctest)
 run.sh          launcher with NVIDIA PRIME offload

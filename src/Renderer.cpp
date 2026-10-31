@@ -224,6 +224,10 @@ void Renderer::particlePass(const FrameInput& in, const Target& hdr) {
         v.brightness = gasBrightness(s);
         v.opacity = s.gasOpacity;
         v.blackbodyLut = in.blackbodyLut;
+        v.noise3d = in.noise3d;
+        v.camPosD = in.camera->position();
+        v.bodies = bodyBuffer_;   // filled by this frame's trace pass
+        v.bodyCount = in.bodies ? static_cast<int>(in.bodies->size()) : 0;
         if (in.debrisDisk && set->law == 0) {
             float dInner = s.diskInner, dOuter = s.diskOuter;
             debrisDiskExtent(in, dInner, dOuter);

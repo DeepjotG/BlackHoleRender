@@ -24,7 +24,8 @@ layout(std430, binding = 2) readonly buffer PartAux { vec4 pAux[]; };
 struct Splat {
     vec4 a;   // centre (px), half extent of the quad (px)
     vec4 b;   // inverse covariance (xx, xy, yy, px^-2), peak optical depth
-    vec4 c;   // emitted colour (HDR)
+    vec4 c;   // emitted colour (HDR), strength of the per-pixel noise modulation
+    vec4 d;   // anchor in noise space, noise units per pixel (gas_splat.frag)
 };
 layout(std430, binding = 13) writeonly buffer Splats { Splat sOut[]; };
 layout(std430, binding = 14) buffer DrawCmd { uint cmdCount, cmdInstances, cmdFirst, cmdBase; };
@@ -49,7 +50,18 @@ uniform float uRefLen;         // M: gas optically thick over this length counts
 uniform vec3 uDiskFade;        // the disk forming from this gas: x outer radius (M), y slab half-height per radius, z how far formed
 uniform int uGasLaw;           // 0: star-disruption gas (tde_visual.glsl); 1: merger particles, whose optical depth, glow,
                                //    temperature and noise scale come in pAux (grb_particles.comp)
-uniform vec3 uLawCentre;       // law 1: centre of the kilonova shell (limb darkening)
+// Particle positions are stored relative to an origin (the hole for the star disruption, the event's
+// centre for the merger): uLawOrigin places them in the world (for the lensing), uOriginRel is the
+// origin relative to the camera, computed in double precision, so gas near a camera far from the hole
+// keeps its precision.
+uniform vec3 uLawOrigin;
+uniform vec3 uOriginRel;
+uniform float uFlow;           // law 1: distance the jets' material has flowed (M): their noise moves along them
+uniform float uNoiseMod;       // law 1: how strongly the per-pixel noise mottles the splats (1: fully)
+// The frame's bodies (layout of shaders/bodies.glsl): law-1 particles behind them are hidden.
+struct OccluderBody { vec4 posRadius, relPos, look, tint, light, lightColor, axis, ring; };
+layout(std430, binding = 3) readonly buffer BodyBuffer { OccluderBody bodies[]; };
+uniform int uBodyCount;
 uniform uint uMaxSplats;
 uniform float uMaxExtent;      // px: splats wider than this (sigma) are a uniform haze and are dropped
 
@@ -62,6 +74,7 @@ const float FILAMENT_TAU = 0.6;   // optical depth across a stream drawn as a fi
 const float TARGET_LAYERS = 12.0; // splats stacked per pixel: beyond this a fraction of the particles is drawn
 const float AREA_BUDGET = 2000.0; // px^2 per splat: tenuous gas with huge, faint splats is drawn by a fraction of them
 const float MIN_KEEP = 0.002;
+const float MIN_LAYERS = 6.0;    // law 1: decimation stops at this many splats stacked per pixel
 const float MIN_PEAK = 3e-4;      // peak opacity below which a splat is not worth drawing
 const float OVERDRAW_PX = 16.0;   // the cell (in px) whose particle count estimates the stacking
 
@@ -165,8 +178,9 @@ bool project(vec3 d, out vec2 px, out mat3x2 J) {
 // the image direction, S is the kernel, tau its peak optical depth. Where many particles stack on the
 // same pixels (over = particles in a cell about OVERDRAW_PX wide, that cell's screen area, the kernel's
 // unlensed screen area) only a fraction of them is drawn, each standing for the others: the blending
-// of hundreds of layers per pixel would otherwise dominate the frame.
-void emit(vec3 d, mat3 M, mat3 S, float tau, vec3 col, float pick, vec3 over, float sigStruct) {
+// of hundreds of layers per pixel would otherwise dominate the frame. noise: the splat's anchor in
+// noise space and the noise units per pixel; nMod: how strongly the noise modulates it.
+void emit(vec3 d, mat3 M, mat3 S, float tau, vec3 col, float pick, vec3 over, float sigStruct, vec4 noise, float nMod) {
     vec2 px;
     mat3x2 J;
     if (!project(d, px, J)) return;
@@ -197,21 +211,32 @@ void emit(vec3 d, mat3 M, mat3 S, float tau, vec3 col, float pick, vec3 over, fl
     float mag = PI * sqrt(max(l1 * l2, 1e-12)) / max(over.z, 1e-12);   // lensing magnification of this image
     float aCell = over.y * clamp(mag, 0.05, 20.0);
     float aSplat = PI * sqrt(det);
-    float layers = over.x * aSplat / max(aCell, aSplat);
+    // Splats stacked here: the cell's particles over its area, times this splat's area (merger and supernova
+    // particles count their full area: their cell is sized to their kernel).
+    float layers = over.x * aSplat / (uGasLaw == 1 ? aCell : max(aCell, aSplat));
     atomicAdd(gArea, uint(min(aSplat / 64.0, 4.0e6) + 0.5));
     float keepGlobal = min(1.0, uAreaBudget / max(float(aLast) * 64.0, 1.0));
     float keep = clamp(min(min(TARGET_LAYERS / max(layers, 1e-6), AREA_BUDGET / aSplat), keepGlobal), MIN_KEEP, 1.0);
-    if (pick >= keep) return;
-    t /= keep;
+    // Merger and supernova particles (law 1) carry their own textured kernels: thinned below a few layers
+    // they would show as separate discs, each with its own texture, so a few layers always stay.
+    if (uGasLaw == 1) keep = max(keep, min(1.0, MIN_LAYERS / max(layers, 1e-6)));
+    // Decimation fades a particle out over the last 30% of its chance instead of cutting it: as the
+    // view changes, particles dim away rather than pop.
+    float w = 1.0 - smoothstep(0.7 * keep, keep, pick);
+    if (w <= 0.0) return;
+    t *= w / keep;
+    // A kept splat stands in for 1/keep particles: its texture is the average of theirs, smoother.
+    if (uGasLaw == 1) nMod *= mix(0.35, 1.0, sqrt(keep));
     if (t < MIN_PEAK) return;
     if (max(cov[0][0], cov[1][1]) > uMaxExtent * uMaxExtent) return;   // a uniform haze: not worth drawing
-    vec2 ext = 2.5 * sqrt(vec2(cov[0][0], cov[1][1]));
+    vec2 ext = 2.0 * sqrt(vec2(cov[0][0], cov[1][1]));
     if (any(lessThan(px + ext, vec2(0.0))) || any(greaterThan(px - ext, uResolution))) return;
     uint slot = atomicAdd(cmdInstances, 1u);
     if (slot >= uMaxSplats) return;
     sOut[slot].a = vec4(px, ext);
     sOut[slot].b = vec4(cov[1][1] / det, -cov[0][1] / det, cov[0][0] / det, t);
-    sOut[slot].c = vec4(col, 0.0);
+    sOut[slot].c = vec4(col, nMod);
+    sOut[slot].d = noise;
 }
 
 void particle(int i);
@@ -225,17 +250,51 @@ void main() {
     if (gl_LocalInvocationID.x == 0u && gArea > 0u) atomicAdd(aNow, gArea);
 }
 
+// How much of a particle at `rel` from the camera (distance D, kernel size h) the bodies leave visible:
+// a sphere whose front surface lies between the camera and the particle hides it, faded over the kernel's
+// size across the limb and through the surface (no popping), and by the body's opacity (a photosphere
+// turning transparent). Straight lines of sight: the occluders are near the particles.
+float bodyVisibility(vec3 rel, float D, float h) {
+    float vis = 1.0;
+    vec3 u = rel / D;
+    for (int k = 0; k < uBodyCount; ++k) {
+        vec3 c = bodies[k].relPos.xyz;
+        float R = bodies[k].posRadius.w;
+        float tc = dot(c, u);
+        float b2 = max(dot(c, c) - tc * tc, 0.0);
+        float bImp = sqrt(b2);
+        if (bImp > R + h || tc + R < 0.0) continue;
+        float front = tc - sqrt(max(R * R - b2, 0.0));
+        float behind = smoothstep(-h, h, D - front);
+        float across = 1.0 - smoothstep(R - h, R + h, bImp);
+        vis *= 1.0 - clamp(bodies[k].ring.w, 0.0, 1.0) * behind * across;
+    }
+    return vis;
+}
+
 void particle(int i) {
     vec4 pos = pPos[i];
     if (!gasParticleDrawn(pos)) return;
-    vec3 p = gasParticlePosition(pos, uFrozen.xyz);
-    if (any(isnan(p)) || any(isinf(p))) return;
+    vec3 pLocal = gasParticlePosition(pos, uFrozen.xyz);   // relative to the origin (hashing, noise)
+    if (any(isnan(pLocal)) || any(isinf(pLocal))) return;
+    vec3 p = pLocal + uLawOrigin;                           // in the world (lensing, the gas laws)
     vec4 vel = pVel[i];
     vec3 v = vel.xyz + (int(pos.w) == 4 ? uFrozenVel.xyz : vec3(0.0));
     float heat = max(pAux[i].y, 0.0);
 
     float nLocal, fil, wFil;
-    mat3 S = kernel(p, nLocal, fil, wFil);
+    mat3 S = kernel(pLocal, nLocal, fil, wFil);
+    if (uGasLaw == 1) {   // merger particles carry their own kernel radius: no jumps between hash levels
+        float h = max(vel.w, 1e-9);
+        S = mat3(h * h);
+        // A velocity longer than 1 stretches the kernel along it by that factor: ejecta fingers, jets streaming.
+        float st = length(vel.xyz);
+        if (st > 1.0) {
+            vec3 e = vel.xyz / st;
+            S += ((st * st - 1.0) * h * h) * outerProduct(e, e);
+        }
+        fil = 0.0;
+    }
     float rho = nLocal / uPartTotal;   // star-mass fraction per M^3
     vec4 vis = tdeVisual(rho, rho * max(vel.w, 0.0), rho * v, rho * heat, p, 1.0);
     // As in gas.glsl, gas that is not optically thick over the reference length is faint and thin (its
@@ -265,7 +324,7 @@ void particle(int i) {
     vec3 col = bb.rgb * (bb.a * vis.b * uGasBrightness * pow(dn, 1.75) * (0.78 + 0.44 * turb) * (0.8 + 0.4 * mottle));   // thin gas glows little: a veil, not fog
     col /= 1.0 + dot(col, vec3(0.2126, 0.7152, 0.0722)) / 8.0;   // as gas.glsl: flares stay readable
 
-    vec3 rel = p - uCamPos;
+    vec3 rel = pLocal + uOriginRel;
     float D = length(rel);
     if (D < 1e-6) return;
     // Peak optical depth: the particle's share of the absorption (alpha / n per particle) over its kernel's
@@ -279,23 +338,42 @@ void particle(int i) {
     // Across a filament the splats stack nLocal * areaK * wFil deep: whatever the sampling, the total
     // optical depth across the stream comes to FILAMENT_TAU.
     tau = max(tau, sparse * FILAMENT_TAU / max(nLocal * areaK * wFil, 1.0));
-    if (uGasLaw == 1) {   // kilonova and jet particles: their own optical depth, temperature and glow
+    // The per-pixel noise (gas_splat.frag): its anchor and scale. The star-disruption gas uses a fixed
+    // world-space scale (a third of the pericentre distance); merger particles carry a scale that grows
+    // with the ejecta (their pattern expands with them) and, for the jets, flows along them.
+    float focal = uResolution.y / (2.0 * uTanHalfFov);
+    float ns = 0.35 * max(uEvent.z, 1e-3);
+    vec3 anchor = p;
+    float nMod = 0.35;
+    if (uGasLaw == 1) {   // merger particles: their own optical depth, temperature and glow
         vec4 aux = pAux[i];
-        float ns = max(abs(aux.w), 1e-9);
-        float turb1 = smoothstep(-0.25, 0.25, fbm3(p / ns + vec3(7.0), 2, 0.5, 23u));
-        float mot1 = smoothstep(-0.2, 0.2, fbm3(p / (0.25 * ns) + vec3(3.0), 2, 0.5, 29u));
-        vec4 bb1 = blackbody(aux.z * 1e4 * (0.92 + 0.16 * turb1));
+        ns = max(abs(aux.w), 1e-9);
+        anchor = pLocal;
+        nMod = (aux.w < 0.0 ? 0.7 : 1.0) * uNoiseMod;   // a jet keeps more of its beam
+        if (aux.w < 0.0) anchor -= normalize(vel.xyz + vec3(1e-30)) * mod(uFlow, ns);   // a jet: the noise moves outward
         // Normalised to the blackbody's colour: at 40,000 K the visible luminance factor is tens of times the
         // Sun's and would burn everything out; aux.y sets the surface brightness in units of the gas brightness.
-        col = bb1.rgb * (aux.y * uGasBrightness * (0.55 + 0.9 * turb1) * (0.7 + 0.6 * mot1));
-        if (aux.w > 0.0) {   // the shell: a photosphere, darker towards its limb (cooler, higher layers show there)
-            float mu = abs(dot(normalize(p - uLawCentre), normalize(p - uCamPos)));
-            col *= 0.3 + 0.7 * mu;
-        }
+        // A negative aux.z picks an emission-line colour instead (supernova remnants): 1 hydrogen red,
+        // 2 oxygen teal, 3 shocked / synchrotron blue, 4 sulphur orange; all at luminance 1.
+        vec3 lineCol = vec3(1.0);
+        int line = int(-aux.z + 0.5);
+        if (line == 1) lineCol = vec3(1.0, 0.2, 0.12);
+        else if (line == 2) lineCol = vec3(0.3, 1.0, 0.72);
+        else if (line == 3) lineCol = vec3(0.45, 0.62, 1.0);
+        else if (line == 4) lineCol = vec3(1.0, 0.6, 0.18);
+        lineCol /= dot(lineCol, vec3(0.2126, 0.7152, 0.0722));
+        vec3 base = aux.z >= 0.0 ? blackbody(aux.z * 1e4).rgb : lineCol;
+        col = base * (aux.y * uGasBrightness);
         col /= 1.0 + dot(col, vec3(0.2126, 0.7152, 0.0722)) / 8.0;
         tau = aux.x * uGasOpacity;
         sparse = 0.0;
+        if (uBodyCount > 0) {   // behind a body (the kilonova's or the supernova's photosphere)
+            float vis = bodyVisibility(rel, D, max(vel.w, 1e-9));
+            if (vis < 0.002) return;
+            tau = -log(max(1.0 - vis * (1.0 - exp(-tau)), 1e-6));   // the splat's coverage scaled by what shows
+        }
     }
+    vec4 noise = vec4(anchor / ns, (D / focal) / ns);
     // As the disk forms the gas condenses into it: particles within the disk's extent give way to it
     // entirely, the hot cloud round the hole largely.
     float rcyl = length(p.xz);
@@ -307,17 +385,29 @@ void particle(int i) {
     float rt = length(p);
     float pick = hash1u(uint(i) * 2654435761u + 17u);
     // Stacking estimate: the particles within a cell about OVERDRAW_PX wide at this distance.
-    float focal = uResolution.y / (2.0 * uTanHalfFov);
     int lvO = clamp(int(round(log2(max(OVERDRAW_PX * D / focal, 1e-30) / uCell0))), 0, HASH_LEVELS - 1);
     float cellPx = gasCellSize(lvO) * focal / D;
-    vec3 over = vec3(float(hashCount(p, lvO)), cellPx * cellPx, (focal / D) * (focal / D) * areaK);
+    float cellCount = float(hashCount(pLocal, lvO));
+    if (uGasLaw == 1) {
+        // Merger and supernova particles: counted in a cell at least as wide as their own kernel (a large
+        // splat stacks with everything it overlaps, not only the neighbours of a 16-pixel cell), the density
+        // blended between the two nearest hash levels and the cell's width continuous, so the estimate (and
+        // the decimation that follows it) does not jump as the camera moves.
+        float lvF = clamp(log2(max(max(OVERDRAW_PX * D / focal, 2.0 * sqrt(areaK / PI)), 1e-30) / uCell0), 0.0, float(HASH_LEVELS - 1));
+        int la = min(int(floor(lvF)), HASH_LEVELS - 2);
+        float wa = gasCellSize(la), wb = gasCellSize(la + 1), wf = uCell0 * exp2(lvF);
+        float dens = mix(float(hashCount(pLocal, la)) / (wa * wa * wa), float(hashCount(pLocal, la + 1)) / (wb * wb * wb), clamp(lvF - float(la), 0.0, 1.0));
+        cellCount = dens * wf * wf * wf;
+        cellPx = wf * focal / D;
+    }
+    vec3 over = vec3(cellCount, cellPx * cellPx, (focal / D) * (focal / D) * areaK);
     float sigStruct = sparse > 0.5 ? wFil / 2.35 * focal / D : 0.0;
     float rc = length(uCamPos);
     // Gas close to the camera (within 1% of its distance from the hole) is projected straight from
     // camera-relative coordinates: the lens table works in hole-centred ones, whose precision at a
     // thousand kilometres from the camera is a screen width, and the bending over that path is nil.
     if (uLensing == 0 || rt >= LENS_RMAX * 0.9 || D < 0.01 * rc) {
-        emit(u, (mat3(1.0) - outerProduct(u, u)) / D, S, tau, col, pick, over, sigStruct);
+        emit(u, (mat3(1.0) - outerProduct(u, u)) / D, S, tau, col, pick, over, sigStruct, noise, nMod);
         return;
     }
     vec3 ch = uCamPos / rc;
@@ -348,6 +438,6 @@ void particle(int i) {
         float kT = sinPhi > 1e-6 ? sgn * sA / (rt * sinPhi) : length(g);
         float maxT = 0.35 * max(sA, 1e-4) / sqrt(max(dot(tHat, S * tHat), 1e-30));
         kT = sign(kT) * min(abs(kT), maxT);
-        emit(d, outerProduct(dA, g) + kT * outerProduct(tHat, tHat), S, tau, col, pick, over, sigStruct);
+        emit(d, outerProduct(dA, g) + kT * outerProduct(tHat, tHat), S, tau, col, pick, over, sigStruct, noise, nMod);
     }
 }

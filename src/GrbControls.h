@@ -8,11 +8,13 @@ struct GrbScenario {
     double siteRadiusM;     // where the binary circles the hole
     double jetTiltDeg;      // the jet axis, tilted from the direction of the hole
     double siteInclinationDeg, siteLongitudeDeg;   // the binary's orbit: tilt from the disk plane, start
+    bool standalone;        // far from any black hole: no lensing, no disk, the burst alone
 };
 inline const GrbScenario kGrbScenarios[] = {
-    {"Beside Sagittarius A* (60 M out, a jet aimed past the hole)", 4.297e6, 60.0, 14.0, 0.0, 200.0},
-    {"In Gargantua's grip (10 M out, above the disk, a jet bent round the hole)", 1e8, 10.0, 40.0, 45.0, 270.0},
-    {"Far from the hole (400 M out)", 4.297e6, 400.0, 30.0, 0.0, 200.0},
+    {"Beside Sagittarius A* (60 M out, a jet aimed past the hole)", 4.297e6, 60.0, 14.0, 0.0, 200.0, false},
+    {"In Gargantua's grip (10 M out, above the disk, a jet bent round the hole)", 1e8, 10.0, 40.0, 45.0, 270.0, false},
+    {"Far from the hole (400 M out)", 4.297e6, 400.0, 30.0, 0.0, 200.0, false},
+    {"Deep space, far from any black hole: the burst alone", 4.297e6, 2.0e7, 30.0, 0.0, 200.0, true},
 };
 inline constexpr int kGrbScenarioCount = static_cast<int>(sizeof(kGrbScenarios) / sizeof(kGrbScenarios[0]));
 inline constexpr int kGrbScenarioCustom = kGrbScenarioCount;

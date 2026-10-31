@@ -33,12 +33,14 @@ struct Params {
     double siteInclinationDeg = 0.0;  // tilt of that orbit from the disk plane (about +X)
     double startSeparationKm = 120.0;
     double jetTiltDeg = 14.0;         // the jet axis, tilted from the direction of the hole (in the orbital plane)
-    double jetHalfAngleDeg = 6.0;
-    double cocoonHalfAngleDeg = 14.0;
+    double jetHalfAngleDeg = 3.5;
+    double cocoonHalfAngleDeg = 10.0;
     double cocoonSpeed = 0.6;         // c
     double ejectaSpeed = 0.2;         // c, polar; the equatorial ejecta move at 0.6 of it
     double jetDelaySeconds = 0.05;    // jets launch this long after the merger
     double jetCoastSeconds = 3600.0;  // the heads move at ~c this long, then slow as t^(1/4)
+    bool standalone = false;          // far from any black hole (siteRadiusM then only sets the units' scale)
+    double sceneScaleM = 60.0;        // the scale the director frames and paces by (the site's distance, or 60 M alone)
 };
 
 struct State {
@@ -164,6 +166,7 @@ public:
     double secondsPerM() const { return sPerM_; }
     const Params& params() const { return prm_; }
     const Spine& spine(int which) const { return spines_[which]; }   // 0: along the axis, 1: opposite
+    glm::dvec3 mergeSite() const { return mergeSite_; }              // where the jets launched from
     glm::dvec3 e1() const { return e1_; }
     glm::dvec3 e2() const { return e2_; }
     glm::dvec3 axis() const { return axis_; }

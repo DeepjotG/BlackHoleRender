@@ -284,6 +284,7 @@ int App::run(const Options& opt) {
     if (!renderer_.init()) logError("shader compilation failed; fix the shaders and press F5");
     tdeCtl_.moduleAvailable = tde_.init(262144);
     grbCtl_.moduleAvailable = grb_.init();
+    snCtl_.moduleAvailable = sn_.init();
     if (!universe_.init()) logWarn("3D universe shaders failed to compile; only the painted backdrop is available");
     applyUniverseSettings();
     if (opt.mass > 0.0) settings_.bhMassSolar = opt.mass;   // after the real placement's own mass, so --mass wins
@@ -302,6 +303,14 @@ int App::run(const Options& opt) {
             grbCtl_.spawnRequested = true;
         } else {
             logWarn("--grb ignored: the merger's particle shader is not available");
+        }
+    }
+    if (opt.snScenario >= 1 && opt.snScenario <= kSnScenarioCount) {
+        if (snCtl_.moduleAvailable) {
+            snCtl_.scenario = opt.snScenario - 1;
+            snCtl_.spawnRequested = true;
+        } else {
+            logWarn("--sn ignored: the supernova's particle shader is not available");
         }
     }
     // What the launch set (the flags, a scenario's black hole) is for this launch only: at exit, a field
@@ -347,6 +356,7 @@ void App::shutdown() {
     ui_.shutdown();
     tde_.shutdown();
     grb_.shutdown();
+    sn_.shutdown();
     universe_.shutdown();
     renderer_.shutdown();
     sky_.shutdown();
@@ -523,6 +533,10 @@ void App::frame() {
         grbParticles_ = grb_.particles();
         if (grbParticles_.count > 0) fi.particlesB = &grbParticles_;
     }
+    if (sn_.active() && !noGas && renderer_.gasParticlesOk()) {
+        snParticles_ = sn_.particles();
+        if (snParticles_.count > 0) fi.particlesB = &snParticles_;
+    }
     if (std::getenv("BHS_DEBUG_TDE") && !gasRefs_.empty()) {
         static int n = 0;
         if (++n % 30 == 0) {
@@ -551,7 +565,7 @@ void App::frame() {
     fi.blackbodyLut = diskTex_.blackbodyLut();
     // An event moves traced content every frame (the star on its way in, the merger's stars and remnant, the
     // steady disk fading, the debris disk forming), so a parked camera must not average frames while one plays.
-    const bool eventPlaying = !settings_.paused && (tde_.active() || grb_.active());
+    const bool eventPlaying = !settings_.paused && (tde_.active() || grb_.active() || sn_.active());
     fi.resetAccumulation = camera_.movedThisFrame() || settingsChanged || eventPlaying;
     camera_.clearMoved();   // the flag means "since last read": cleared now so the next frame starts clean
     fi.diskAnimating = !settings_.paused && settings_.diskSpeed > 0.0f && settings_.diskMode != DISK_NONE;
@@ -663,7 +677,16 @@ void App::frame() {
         ctx.grbState = &grb_.state();
         ctx.grbModel = &grb_.model();
         ctx.grbWarp = grbWarp_ > 0.0 ? grbWarp_ : settings_.timeWarp;
-        if (grb_.active()) {   // the caption overlay follows whichever event plays
+        ctx.sn = &snCtl_;
+        ctx.snActive = sn_.active();
+        ctx.snState = &sn_.state();
+        ctx.snModel = &sn_.model();
+        ctx.snWarp = snWarp_ > 0.0 ? snWarp_ : settings_.timeWarp;
+        if (sn_.active()) {   // the caption overlay follows whichever event plays
+            ctx.eventTitle = snDirector_.title();
+            ctx.eventCaption = snDirector_.caption();
+            ctx.eventFade = snDirector_.fade();
+        } else if (grb_.active()) {
             ctx.eventTitle = grbDirector_.title();
             ctx.eventCaption = grbDirector_.caption();
             ctx.eventFade = grbDirector_.fade();
@@ -868,6 +891,7 @@ void App::buildBodies() {
         bodies_.push_back(b);
     }
     grb_.appendBodies(bodies_, settings_.gasBrightness);
+    sn_.appendBodies(bodies_);
     universe_.update(camera_.position(), simSeconds_, settings_, bodies_);
 }
 
@@ -882,7 +906,7 @@ void App::saveSettings() {
 // An event's scenario (or the Real universe's placement) brings its own black hole along. Once it is over,
 // the Real universe's comes back while that is on (the user's own on leaving it), else the user's own.
 void App::restoreUserMass() {
-    if (userMass_ <= 0.0 || tde_.active() || grb_.active()) return;
+    if (userMass_ <= 0.0 || tde_.active() || grb_.active() || sn_.active()) return;
     const double realMass = universe_.active() ? universe_.content().suggestedMassSolar : 0.0;
     settings_.bhMassSolar = realMass > 0.0 ? realMass : userMass_;
     if (realMass <= 0.0) userMass_ = 0.0;
@@ -956,6 +980,10 @@ void App::updateTde(double dtM, double dtReal) {
         if (grb_.active()) {   // one event at a time
             grb_.clear();
             grbDirector_.stop();
+        }
+        if (sn_.active()) {
+            sn_.clear();
+            snDirector_.stop();
         }
         renderer_.resetGasParticleStats();
         director_.start(tde_.starPosition(), tde_.starVelocity());
@@ -1031,6 +1059,10 @@ void App::updateGrb(double dtM, double dtReal) {
             director_.stop();
             tdeWarp_ = 0.0;    // or updateWorld would pace the merger's next frame by the star's clock
         }
+        if (sn_.active()) {
+            sn_.clear();
+            snDirector_.stop();
+        }
         // A selected scenario is played exactly as described, including its black hole; the user's own comes
         // back once the event is over (restoreUserMass).
         if (grbCtl_.scenario >= 0 && grbCtl_.scenario < kGrbScenarioCount) {
@@ -1044,6 +1076,11 @@ void App::updateGrb(double dtM, double dtReal) {
         prm.siteInclinationDeg = grbCtl_.siteInclinationDeg;
         prm.siteLongitudeDeg = grbCtl_.siteLongitudeDeg;
         prm.startSeparationKm = grbCtl_.startSeparationKm;
+        // Deep space only as its own scenario: "Custom" (picked, or by changing the mass) plays beside this
+        // black hole, within the panel's reach of it.
+        prm.standalone = grbCtl_.scenario >= 0 && grbCtl_.scenario < kGrbScenarioCount && kGrbScenarios[grbCtl_.scenario].standalone;
+        if (!prm.standalone) prm.siteRadiusM = std::min(prm.siteRadiusM, 2000.0);
+        prm.sceneScaleM = prm.standalone ? 60.0 : prm.siteRadiusM;
         grb_.spawn(prm);
         grbDirector_.start(grb_.model());
         grbCtl_.watchRequested = true;
@@ -1086,6 +1123,75 @@ void App::updateGrb(double dtM, double dtReal) {
                     st.timeM * sPerM, static_cast<int>(grbDirector_.stage()), grbDirector_.pace() * sPerM, grbDirector_.fade(),
                     st.separationM * mPerM * 1e-3, st.periodM * sPerM * 1e3, st.knRadiusM, st.knTempK, st.knTau, std::max(st.jetHeadM[0], st.jetHeadM[1]), st.jetBright,
                     glm::length(camera_.position() - st.centre), glm::length(camera_.position()));
+        }
+    }
+}
+
+void App::updateSn(double dtM, double dtReal) {
+    if (snCtl_.clearRequested) {
+        snCtl_.clearRequested = false;
+        sn_.clear();
+        snDirector_.stop();
+    }
+    bool spawned = false;   // this frame (dtM is then stale: see updateTde)
+    if (snCtl_.spawnRequested) {
+        snCtl_.spawnRequested = false;
+        spawned = true;
+        if (tde_.active()) {   // one event at a time
+            tde_.clear();
+            director_.stop();
+        }
+        if (grb_.active()) {
+            grb_.clear();
+            grbDirector_.stop();
+        }
+        tdeWarp_ = grbWarp_ = 0.0;   // or updateWorld would pace the supernova's next frame by their clocks
+        const SnScenario& sc = kSnScenarios[std::clamp(snCtl_.scenario, 0, kSnScenarioCount - 1)];
+        sn::Params prm;
+        prm.bhMassSolar = settings_.bhMassSolar;   // sets the units only: the star is far from the hole
+        prm.starMassSolar = sc.starMassSolar;
+        prm.starRadiusSolar = sc.starRadiusSolar;
+        prm.starTeffK = sc.starTeffK;
+        sn_.spawn(prm);
+        snDirector_.start(sn_.model());
+        snCtl_.watchRequested = true;
+    }
+    if (snCtl_.watchRequested) {
+        snCtl_.watchRequested = false;
+        if (snDirector_.active()) {   // as for the star disruption's Watch
+            followName_.clear();
+            flightTarget_.clear();
+            camera_.cancelFlight();
+            camera_.setAutoOrbit(false);
+            snDirector_.engageCamera();
+        }
+    }
+    if (!sn_.active()) {
+        snWarp_ = 0.0;
+        snDirector_.stop();
+        return;
+    }
+    SnDirector::Input din;
+    din.dt = dtReal;
+    din.state = &sn_.state();
+    din.model = &sn_.model();
+    snDirector_.update(din);
+    if (snDirector_.finished()) {   // the remnant has faded
+        sn_.clear();
+        snDirector_.stop();
+        snWarp_ = 0.0;
+        return;
+    }
+    snWarp_ = snCtl_.autoWarp ? std::clamp(snDirector_.pace() * units::secondsPerM(settings_.bhMassSolar), 1e-6, 1e11) : 0.0;
+    if (!spawned) sn_.step(dtM);   // a stale interval would skip the star (see updateTde)
+    if (std::getenv("BHS_DEBUG_TDE")) {
+        static int n = 0;
+        if (++n % 30 == 0) {
+            const sn::State& st = sn_.state();
+            const double sPerM = sn_.model().secondsPerM();
+            logInfo("sn t={:.4g} s stage {} pace {:.3g} s/s fade {:.2f} | photo R {:.4g} M T {:.0f} K b {:.2f} op {:.2f} | nebula R {:.4g} M b {:.3f} | cam {:.4g} M from the star",
+                    st.timeM * sPerM, static_cast<int>(snDirector_.stage()), snDirector_.pace() * sPerM, snDirector_.fade(), st.photoRadiusM,
+                    st.photoTempK, st.photoBright, st.photoOpacity, st.nebulaRadiusM, st.nebulaBright, glm::length(camera_.position() - st.site));
         }
     }
 }
@@ -1138,7 +1244,7 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     // its own, faster clock (auto warp) so the event stays watchable without the planets racing around.
     const double sPerMNow = units::secondsPerM(settings_.bhMassSolar);
     const double dtSim = settings_.paused ? 0.0 : settings_.timeWarp * static_cast<double>(dt);
-    const double eventWarp = tdeWarp_ > 0.0 ? tdeWarp_ : (grbWarp_ > 0.0 ? grbWarp_ : settings_.timeWarp);
+    const double eventWarp = tdeWarp_ > 0.0 ? tdeWarp_ : (grbWarp_ > 0.0 ? grbWarp_ : (snWarp_ > 0.0 ? snWarp_ : settings_.timeWarp));
     const double dtEvent = settings_.paused ? 0.0 : eventWarp * static_cast<double>(dt);
     simSeconds_ += dtSim;
     bhSystem_.update(dtSim / sPerMNow);
@@ -1147,8 +1253,9 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     const double dtDirector = settings_.paused ? 0.0 : static_cast<double>(dt);
     updateTde(dtEvent / sPerMNow, dtDirector);
     updateGrb(dtEvent / sPerMNow, dtDirector);
+    updateSn(dtEvent / sPerMNow, dtDirector);
     // An event over (Clear, or by itself) gives back the black hole its scenario replaced.
-    const bool eventActive = tde_.active() || grb_.active();
+    const bool eventActive = tde_.active() || grb_.active() || sn_.active();
     if (wasEventActive_ && !eventActive) restoreUserMass();
     wasEventActive_ = eventActive;
     buildBodies();
@@ -1241,6 +1348,18 @@ void App::updateWorld(float dt, const Camera::Input& in) {
             camera_.lookAt(target);
         }
     }
+    // The supernova's director: same rules.
+    if (snDirector_.cameraEngaged()) {
+        const bool steering = glm::length(in.move) > 0.0f || glm::length(in.lookDelta) > 0.0f || in.roll != 0.0f;
+        if (steering || camera_.isTransitioning() || camera_.autoOrbit()) {
+            snDirector_.releaseCamera();
+        } else {
+            glm::dvec3 pos, target;
+            snDirector_.view(pos, target);
+            camera_.setPose(pos, camera_.orientation());
+            camera_.lookAt(target);
+        }
+    }
 
     // Ride along (Planets panel): within a ride's reach the ride starts from the planet's current
     // position, so the first shift below is zero. Farther away, or while a flight is under way (a
@@ -1296,7 +1415,18 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     // Flight speed follows the distance to the nearest surface (horizon or planet).
     nearestDist_ = nearestSurfaceDistance(&nearestName_);
     const double speed = 0.35 * camera_.baseSpeed * std::max(nearestDist_, 1e-12) * (turbo_ ? 1000.0 : 1.0);
-    camera_.maxRadius = settings_.universeMode == 0 ? 20000.0 : 1e22;
+    // The painted backdrop keeps the camera within 20,000 M of the hole, except while the supernova or the
+    // merger plays (their shots reach far beyond it: deep space, the days after the merger). When one is
+    // over, the camera flies home if the event's director was filming (rather than leave it staring at an
+    // empty sky) or if it is beyond that limit; the limit waits until it is back inside.
+    const bool farEvent = sn_.active() || grb_.active();
+    if (wasFarEvent_ && !farEvent && goToRequest_.empty() && !camera_.isTransitioning() &&
+        ((farEventCam_ && camera_.radius() > 2000.0) || (settings_.universeMode == 0 && camera_.radius() > 20000.0)))
+        goToRequest_ = "black hole";
+    wasFarEvent_ = farEvent;
+    farEventCam_ = (sn_.active() && snDirector_.cameraEngaged()) || (grb_.active() && grbDirector_.cameraEngaged());
+    const bool homeward = camera_.radius() > 20000.0 && (camera_.isTransitioning() || !goToRequest_.empty());
+    camera_.maxRadius = settings_.universeMode == 0 && !farEvent && !homeward ? 20000.0 : 1e22;
     camera_.update(dt, in, speed);
     wasTransitioning_ = camera_.isTransitioning();
     for (const BodyDesc& b : bodies_)

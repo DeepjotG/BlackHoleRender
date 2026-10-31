@@ -16,9 +16,10 @@ namespace bhs::grb {
 
 class GrbEvent {
 public:
-    static constexpr int kCountKn = 65536;
-    static constexpr int kCountJet = 24576;    // per jet
-    static constexpr int kCoreCount = 16384;   // of each jet
+    static constexpr int kCountWisp = 6144;   // the kilonova's ragged outer layer (its photosphere is a body)
+    static constexpr int kCountJet = 8192;    // per jet
+    static constexpr int kCoreCount = 6144;   // of each jet; the rest is the cocoon
+    static constexpr int kCountHalo = 160;    // afterglow particles per jet
 
     bool init();                 // compiles the particle shader and creates the buffers; false: particles unavailable
     void shutdown();
@@ -32,7 +33,7 @@ public:
     bool merged() const { return active_ && state_.merged; }
     // The particle set for the renderer (after the merger; count 0 before).
     GasParticlesRef particles() const;
-    // The two stars before the merger (surface brightness law of the gas, see bodies.glsl).
+    // The two stars before the merger; afterwards the kilonova's photosphere and the merger remnant.
     void appendBodies(std::vector<BodyDesc>& bodies, float brightness) const;
 
 private:

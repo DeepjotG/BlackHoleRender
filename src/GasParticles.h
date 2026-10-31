@@ -21,7 +21,9 @@ struct GasParticlesRef {
     float farRadius = 1e30f;    // M: bound gas farther out predicts when it comes back
     float returnFraction = 0.0025f;   // of all particles: stats().returnInM is when this much is back
     int law = 0;                // shading: 0 star-disruption gas, 1 merger particles (see gas_splat.comp)
-    glm::vec3 centre{0.0f};     // law 1: the kilonova shell's centre (limb darkening)
+    glm::dvec3 origin{0.0};     // the positions are relative to this point (the hole, or the merger's centre)
+    float flowM = 0.0f;
+    float noiseMod = 1.0f;          // law 1: how strongly the per-pixel noise mottles the splats (1: fully)         // law 1: how far the jets' material has flowed (their noise moves along them)
     bool wantStats = true;      // measure stats() from this set
 };
 
@@ -42,8 +44,11 @@ struct GasDrawParams {
     float tanHalfFov = 0.5f;
     bool lensing = true;
     float brightness = 1.0f, opacity = 1.0f;
-    GLuint blackbodyLut = 0;
+    GLuint blackbodyLut = 0, noise3d = 0;
+    glm::dvec3 camPosD{0.0};    // the camera, in double (the origin's offset from it is formed here)
     float diskOuter = 0.0f, diskSlab = 0.0f, diskPresence = 0.0f;   // the disk forming from the gas (see gas_splat.comp)
+    GLuint bodies = 0;          // this frame's bodies (BodyGpu): merger and supernova particles behind them are hidden
+    int bodyCount = 0;
 };
 
 // Draws the star-disruption gas as its particles: each one a soft splat at full screen resolution, at

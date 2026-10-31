@@ -147,7 +147,7 @@ const char* lookName(universe::PlanetLook l) {
 }
 // The star disruption's stage, captioned at the bottom of the screen like a documentary.
 void drawTdeCaption(const UiContext& c) {
-    if (!c.tdeActive && !c.grbActive) return;
+    if (!c.tdeActive && !c.grbActive && !c.snActive) return;
     if (c.eventFade > 0.001f) {   // a cut between two shots: through black
         const ImGuiViewport* v = ImGui::GetMainViewport();
         ImGui::GetBackgroundDrawList()->AddRectFilled(v->Pos, ImVec2(v->Pos.x + v->Size.x, v->Pos.y + v->Size.y),
@@ -563,14 +563,20 @@ void Ui::draw(UiContext& c) {
         scen[kGrbScenarioCustom] = "Custom (the orbit below, this black hole)";
         if (ImGui::Combo("Scenario##grb", &g.scenario, scen, kGrbScenarioCount + 1) && g.scenario < kGrbScenarioCount)
             (void)g.applyScenario(g.scenario);   // its black hole is switched to at Spawn, not now
-        const double before[2] = {g.siteRadiusM, g.jetTiltDeg};
-        sliderLogD("Distance from the hole (M)##grb", &g.siteRadiusM, 4.0, 2000.0, "%.0f");
-        const double tiltMin = 0.0, tiltMax = 90.0;
-        ImGui::SliderScalar("Jet aim (deg from the hole)", ImGuiDataType_Double, &g.jetTiltDeg, &tiltMin, &tiltMax, "%.0f");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 aims one jet straight at the black hole (it falls in); a few degrees off, it is bent past it.");
-        if (g.siteRadiusM != before[0] || g.jetTiltDeg != before[1]) g.scenario = kGrbScenarioCustom;
-        ImGui::TextDisabled("Two 1.4-solar-mass neutron stars, 120 km apart, circling the black hole. The whole event is about a minute and a half.");
-        if (g.scenario < kGrbScenarioCount && kGrbScenarios[g.scenario].bhMassSolar != s.bhMassSolar)
+        const bool alone = g.scenario < kGrbScenarioCount && kGrbScenarios[g.scenario].standalone;
+        if (alone) {
+            ImGui::TextDisabled("Deep space: the burst plays far beyond the black hole's lensing, with nothing but the sky around it, to see the effect itself.");
+        } else {
+            const double before[2] = {g.siteRadiusM, g.jetTiltDeg};
+            sliderLogD("Distance from the hole (M)##grb", &g.siteRadiusM, 4.0, 2000.0, "%.0f");
+            const double tiltMin = 0.0, tiltMax = 90.0;
+            ImGui::SliderScalar("Jet aim (deg from the hole)", ImGuiDataType_Double, &g.jetTiltDeg, &tiltMin, &tiltMax, "%.0f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 aims one jet straight at the black hole (it falls in); a few degrees off, it is bent past it.");
+            if (g.siteRadiusM != before[0] || g.jetTiltDeg != before[1]) g.scenario = kGrbScenarioCustom;
+        }
+        ImGui::TextDisabled("Two 1.4-solar-mass neutron stars, 120 km apart%s. The whole event is about a minute and a half.",
+                            alone ? "" : ", circling the black hole");
+        if (!alone && g.scenario < kGrbScenarioCount && kGrbScenarios[g.scenario].bhMassSolar != s.bhMassSolar)
             ImGui::TextDisabled("Spawn switches to a %s black hole for the event; the current one comes back when it is over (Clear).",
                                 units::formatMassSolar(kGrbScenarios[g.scenario].bhMassSolar).c_str());
         ImGui::BeginDisabled(!g.moduleAvailable);
@@ -603,6 +609,47 @@ void Ui::draw(UiContext& c) {
                 ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the merger is frozen. Press P to continue.");
             else if (!g.autoWarp)
                 ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Auto time warp is off: the event runs at your time warp, without its slow motion and time-lapse. Tick it to pace it.");
+        }
+    }
+
+    // ---- supernova ----
+    if (c.sn && ImGui::CollapsingHeader("Supernova")) {
+        SnControls& g = *c.sn;
+        if (!g.moduleAvailable) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "The supernova's particle shader is not available in this build.");
+        const char* scen[kSnScenarioCount];
+        for (int i = 0; i < kSnScenarioCount; ++i) scen[i] = kSnScenarios[i].name;
+        ImGui::Combo("Star##sn", &g.scenario, scen, kSnScenarioCount);
+        ImGui::TextDisabled("Blows up a star in deep space, far from the black hole: the collapse, the breakout flash, the envelope flying apart and "
+                            "the remnant fading over years, in about a minute and a half.");
+        ImGui::BeginDisabled(!g.moduleAvailable);
+        if (ImGui::Button("Blow up the star")) g.spawnRequested = true;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Clear##sn")) g.clearRequested = true;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!c.snActive);
+        if (ImGui::Button("Watch##sn")) g.watchRequested = true;
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(c.snActive ? "Hands the camera back to the event." : "Blow up the star first: there is nothing to watch yet.");
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto time warp##sn", &g.autoWarp);
+        if (c.snActive && c.snState && c.snModel) {
+            const sn::State& st = *c.snState;
+            const double mPerM = c.snModel->metersPerM();
+            if (c.eventTitle && *c.eventTitle) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.eventTitle);
+            if (c.eventCaption && *c.eventCaption) ImGui::TextWrapped("%s", c.eventCaption);
+            const std::string clockText = s.paused ? std::string("paused") : "1 s = " + units::formatDuration(c.snWarp);
+            if (!st.breakout)
+                ImGui::Text("%s across at %.0f K, %s   event clock: %s", units::formatDistance(2.0 * st.photoRadiusM * mPerM).c_str(), st.photoTempK,
+                            st.collapsed ? "the shock climbing through it" : "its core about to collapse", clockText.c_str());
+            else
+                ImGui::Text("%s after the breakout   %s across   event clock: %s", units::formatDuration(st.tauS).c_str(),
+                            units::formatDistance(2.0 * std::max(st.photoRadiusM, st.shellRadiusM) * mPerM).c_str(), clockText.c_str());
+            if (s.paused)
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the supernova is frozen. Press P to continue.");
+            else if (!g.autoWarp)
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Auto time warp is off: the event runs at your time warp, without its time-lapse. Tick it to pace it.");
         }
     }
 

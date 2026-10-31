@@ -20,18 +20,18 @@ void GrbDirector::start(const grb::Model& model) {
     camera_ = true;
     stageSeconds_ = overSeconds_ = 0.0;
     drift_ = 0.0;
-    view_ = vClose;
-    cut_ = -1.0;
-    fade_ = 0.0;
+    cut_.reset(vClose);
     sPerM_ = model.secondsPerM();
     a0_ = model.initialSeparationM();
-    siteR_ = model.params().siteRadiusM;
+    scale_ = model.params().sceneScaleM;
+    standalone_ = model.params().standalone;
     const grb::State s0 = model.at(0.0);
     period0_ = std::max(s0.periodM, 1e-12);
     pace_ = period0_ / 0.25;
     // The close shots look at the binary from its far side, so the black hole looms behind it, from a
-    // little above the binary's orbital plane and off its axis (the jets will cross the frame).
-    const glm::dvec3 dirHole = -glm::normalize(s0.site);
+    // little above the binary's orbital plane and off its axis (the jets will cross the frame). Alone in
+    // deep space, the same framing relative to the jet axis.
+    const glm::dvec3 dirHole = standalone_ ? -model.axis() : -glm::normalize(s0.site);
     closeDir_ = glm::normalize(-0.85 * dirHole + 0.45 * model.e1() + 0.3 * glm::dvec3(0.0, 1.0, 0.0));
 }
 
@@ -45,7 +45,7 @@ const char* GrbDirector::title() const {
     case kInspiral: return "1/5  Two neutron stars spiral in (slow motion)";
     case kMerger: return "2/5  Merger: the gamma-ray burst (slow motion)";
     case kBurst: return "3/5  The jets race out, the kilonova swells (time-lapse)";
-    case kAfterglow: return "4/5  The kilonova engulfs the black hole";
+    case kAfterglow: return standalone_ ? "4/5  The kilonova" : "4/5  The kilonova engulfs the black hole";
     case kDays: return "5/5  The days after (time-lapse, from far out)";
     case kOver: return "The kilonova has faded";
     default: return "";
@@ -61,15 +61,21 @@ const char* GrbDirector::caption() const {
         return "In a millisecond they become one. A fiftieth of a solar mass of neutron-rich matter is flung out at "
                "a fifth of the speed of light, and twin jets punch out along the spin axis: the gamma-ray burst.";
     case kBurst:
-        return "The jets, a few degrees wide and moving at almost the speed of light, race away; the one aimed past "
-               "the black hole is bent by its gravity. The ejecta glow white-hot, forging gold and platinum.";
+        return standalone_ ? "The jets, a few degrees wide and moving at almost the speed of light, race away, each ploughing "
+                             "into its surroundings in a glowing shock. The ejecta glow white-hot, forging gold and platinum."
+                           : "The jets, a few degrees wide and moving at almost the speed of light, race away; the one aimed past "
+                             "the black hole is bent by its gravity. The ejecta glow white-hot, forging gold and platinum.";
     case kAfterglow:
-        return "The jets fade into an afterglow while the ejecta, still white-hot, sweep over the black hole and then "
-               "the camera.";
+        return standalone_ ? "The jets fade into an afterglow, ploughing into the space around, while the ejecta, still white-hot "
+                             "and boiling, swell to fill the view."
+                           : "The jets fade into an afterglow while the ejecta, still white-hot and boiling, swell over the black "
+                             "hole.";
     case kDays:
-        return "The black hole is inside the cloud now. Over the days that follow the ejecta cool from white through "
-               "yellow to red and turn transparent, carrying the gold and platinum they forged out into space.";
-    case kOver: return "The ejecta have dispersed; the black hole is quiet again.";
+        return standalone_ ? "Over the days that follow the ejecta cool from white through yellow to red and turn transparent, "
+                             "carrying the gold and platinum they forged out into space."
+                           : "The black hole is inside the cloud now. Over the days that follow the ejecta cool from white through "
+                             "yellow to red and turn transparent, carrying the gold and platinum they forged out into space.";
+    case kOver: return standalone_ ? "The ejecta have dispersed." : "The ejecta have dispersed; the black hole is quiet again.";
     default: return "";
     }
 }
@@ -85,20 +91,21 @@ GrbDirector::Pose GrbDirector::viewPose(View v, const Input& in) const {
         const double d = std::max(200.0 * a0_, 8.0 * s.knRadiusM);
         return {s.centre + closeDir_ * d, s.centre};
     }
-    case vFar: return {s.centre + closeDir_ * (0.1 * siteR_), s.centre};   // unused
+    case vFar: return {s.centre + closeDir_ * (0.1 * scale_), s.centre};   // unused
     case vPull: return {s.centre + pullDir_ * (8.0 * std::max(s.knRadiusM, 1e-6)), s.centre};
     case vWide: {
         // Framing the merger site and the black hole: from the side of the line between them, above the
-        // orbital plane, drifting slowly round.
-        const glm::dvec3 site = s.centre;
-        const glm::dvec3 sHat = glm::normalize(site);
+        // orbital plane, drifting slowly round. Alone in deep space: the same framing about the jet axis,
+        // centred on the ejecta.
         const glm::dvec3 up(0.0, 1.0, 0.0);
-        glm::dvec3 side = glm::cross(up, sHat);
+        const glm::dvec3 ref = standalone_ ? s.axis : glm::normalize(s.centre);
+        glm::dvec3 side = glm::cross(up, ref);
         side = glm::length(side) > 1e-9 ? glm::normalize(side) : glm::dvec3(0.0, 0.0, 1.0);
-        const double d = 3.5 * glm::length(site);
+        const double d = 3.5 * scale_;
         const double az = glm::radians(drift_);
-        const glm::dvec3 dir = glm::normalize((0.85 * std::cos(az)) * side + (0.85 * std::sin(az)) * sHat + 0.5 * up + 0.2 * sHat);
-        return {0.5 * site + dir * d, 0.5 * site};
+        const glm::dvec3 dir = glm::normalize((0.85 * std::cos(az)) * side + (0.85 * std::sin(az)) * ref + 0.5 * up + 0.2 * ref);
+        const glm::dvec3 target = standalone_ ? s.centre : 0.5 * s.centre;
+        return {target + dir * d, target};
     }
     }
     return {viewPos_, viewTarget_};
@@ -120,14 +127,14 @@ void GrbDirector::update(const Input& in) {
         if (s.knRadiusM > 0.45 * 200.0 * a0_ || stageSeconds_ > 14.0) setStage(kBurst);
         break;
     case kBurst:
-        if (s.knRadiusM > 0.3 * siteR_ || s.tauM * sPerM_ > 86400.0) {
+        if (s.knRadiusM > 0.3 * scale_ || s.tauM * sPerM_ > 86400.0) {
             setStage(kAfterglow);
             // The ejecta reach the camera in about 50 s of watching.
             holdPace_ = std::max((camDist - s.knRadiusM) / (in.model->params().ejectaSpeed * 50.0), 1e-6);
         }
         break;
     case kAfterglow:
-        if (s.knRadiusM > 0.8 * camDist) {   // the shell is about to reach the camera: cut to far out for the days after
+        if (s.knRadiusM > 0.45 * camDist) {   // the ejecta fill most of the view: cut to far out for the days after
             setStage(kDays);
             daysPace0_ = pace_;
             const glm::dvec3 away = in.cameraPos - s.centre;
@@ -174,24 +181,15 @@ void GrbDirector::update(const Input& in) {
     switch (stage_) {
     case kInspiral: want = vClose; break;
     case kMerger: want = s.knRadiusM > 0.25 * 4.0 * a0_ ? vMedium : vClose; break;   // the flash engulfs the close shot
-    case kBurst: want = 8.0 * s.knRadiusM >= 3.5 * glm::length(s.centre) ? vWide : vMedium; break;   // the pull-back has reached the wide shot
+    case kBurst: want = 8.0 * s.knRadiusM >= 3.5 * scale_ ? vWide : vMedium; break;   // the pull-back has reached the wide shot
     case kAfterglow: want = vWide; break;
     case kDays:
     case kOver: want = vPull; break;
     default: break;
     }
-    if (want != view_ && cut_ < 0.0) cut_ = 0.0;
-    if (cut_ >= 0.0) {
-        cut_ += dt;
-        if (cut_ >= 0.4 && view_ != want) view_ = want;
-        fade_ = cut_ < 0.4 ? cut_ / 0.4 : std::max(0.0, 1.0 - (cut_ - 0.4) / 0.4);
-        if (cut_ >= 0.8) {
-            cut_ = -1.0;
-            fade_ = 0.0;
-        }
-    }
-    if (stage_ == kOver) fade_ = std::max(fade_, smooth01(overSeconds_ / 1.0));   // and out
-    const Pose cur = viewPose(view_, in);
+    cut_.update(want, dt);
+    if (stage_ == kOver) cut_.fade = std::max(cut_.fade, smooth01(overSeconds_ / 1.0));   // and out
+    const Pose cur = viewPose(static_cast<View>(cut_.view), in);
     viewPos_ = cur.pos;
     viewTarget_ = cur.target;
 }
