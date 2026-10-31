@@ -86,6 +86,7 @@ const std::vector<Field>& fields() {
         BHS_FIELD(tonemap), BHS_FIELD(vignette), BHS_FIELD(grain), BHS_FIELD(chromaticAberration),
         BHS_FIELD(saturation), BHS_FIELD(sharpen),
         BHS_TRACE(fovDeg), BHS_FIELD(mouseSensitivity), BHS_FIELD(invertY),
+        BHS_FIELD(speedMode), BHS_FIELD(speedScale), BHS_FIELD(fixedSpeed), BHS_FIELD(turboFactor), BHS_FIELD(travelSpeed),
         BHS_TRACE(showShadowOverlay), BHS_FIELD(showUi),
         BHS_TRACE(universeMode), BHS_TRACE(universeSeed), BHS_TRACE(realPlacement), BHS_TRACE(bhMassSolar),
         BHS_FIELD(timeWarp), BHS_TRACE(planetsEnabled), BHS_FIELD(showLabels), BHS_TRACE(gasBrightness), BHS_TRACE(gasOpacity), BHS_TRACE(deepSky),

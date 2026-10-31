@@ -70,6 +70,7 @@ struct Options {
     int captureW = 3840, captureH = 2160, captureSamples = 24;
     std::string shaderDir;
     std::string settingsPath = "settings.ini";
+    bool settingsGiven = false;      // --settings: used even by automated runs
 };
 
 class App {

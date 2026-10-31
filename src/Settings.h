@@ -11,6 +11,10 @@ inline constexpr double kDiskFlowRate = 16.0;
 enum TonemapMode : int { TONEMAP_AGX = 0, TONEMAP_ACES = 1, TONEMAP_REINHARD = 2, TONEMAP_NONE = 3 };
 enum Preset : int { PRESET_LOW = 0, PRESET_MEDIUM = 1, PRESET_HIGH = 2, PRESET_ULTRA = 3, PRESET_CUSTOM = 4 };
 
+// The fixed flight speed's range (m/s): a kilometre a second to a million light-years a second.
+inline constexpr double kMinFixedSpeed = 1e3;
+inline constexpr double kMaxFixedSpeed = 9.4607304725808e21;
+
 // All tunable parameters. Units: G = c = M = 1 (horizon r = 2, ISCO r = 6).
 struct Settings {
     // ---- Quality ----
@@ -83,6 +87,13 @@ struct Settings {
     float mouseSensitivity = 0.12f;
     bool invertY = false;
 
+    // ---- Flight ----
+    int speedMode = 0;              // 0: automatic (follows the distance to the nearest surface), 1: fixed
+    float speedScale = 1.0f;        // automatic: multiplier on the speed it picks (scroll wheel)
+    double fixedSpeed = 1e9;        // fixed: metres per second, the same everywhere (scroll wheel)
+    float turboFactor = 1000.0f;    // turbo (T) multiplies the speed by this
+    float travelSpeed = 1.0f;       // Travel list, Go and bookmark flights: 2 = twice as fast
+
     // ---- Debug / UI ----
     bool showShadowOverlay = false;
     bool showUi = true;
@@ -98,5 +109,13 @@ struct Settings {
     std::string fingerprint() const;       // changes whenever any saved field changes
     std::string traceFingerprint() const;  // only fields that change the traced HDR image
 };
+
+// Full-stick flight speed in M per second: automatic follows the distance to the nearest surface (M) times
+// the user's multiplier; fixed is the user's own speed (m/s) in units of M (metresPerM); turbo multiplies
+// either.
+inline double flightSpeedM(const Settings& s, double nearestSurfaceM, double metresPerM, bool turbo) {
+    const double base = s.speedMode == 1 ? s.fixedSpeed / metresPerM : 0.35 * s.speedScale * (nearestSurfaceM > 1e-12 ? nearestSurfaceM : 1e-12);
+    return turbo ? base * (s.turboFactor < 1.0f ? 1.0 : (s.turboFactor > 1e5f ? 1e5 : s.turboFactor)) : base;
+}
 
 }  // namespace bhs

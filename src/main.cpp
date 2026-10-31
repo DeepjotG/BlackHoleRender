@@ -124,7 +124,10 @@ int main(int argc, char** argv) {
         else if (a == "--ui") o.forceUi = true;
         else if (a == "--no-capture") o.noCapture = true;
         else if (a == "--shaders") o.shaderDir = next();
-        else if (a == "--settings") o.settingsPath = next();
+        else if (a == "--settings") {
+            o.settingsPath = next();
+            o.settingsGiven = true;
+        }
         else {
             std::fprintf(stderr, "unknown option %s\n", a.c_str());
             usage();

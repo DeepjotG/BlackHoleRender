@@ -42,7 +42,9 @@ std::string formatSpeed(double v) {
     const double a = std::fabs(v);
     if (a < 1e3) return fmt(v, "m/s");
     if (a < 0.01 * kC) return fmt(v / 1e3, "km/s");
-    return fmt(v / kC, "c");
+    if (a < 0.01 * kLightYear) return fmt(v / kC, "c");
+    if (a < 1e6 * kLightYear) return fmt(v / kLightYear, "ly/s");
+    return fmt(v / (1e6 * kLightYear), "million ly/s");
 }
 
 std::string formatMassSolar(double ms) {

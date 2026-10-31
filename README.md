@@ -109,9 +109,13 @@ holds a target frame time by scaling the internal resolution.
   lensed like everything else, lit by the accretion disk, and drawn at their real size, so from the
   default view they are smaller than a pixel: use *Travel*.
 * **Travel:** the *Travel* panel flies you to the black hole or any planet. Near a planet the camera
-  rides along with it (Miller moves at almost half the speed of light). Flight speed follows the
-  distance to the nearest surface, so you can creep along a planet's horizon or cross the system in
-  seconds; scroll to scale it, Shift for 5x.
+  rides along with it (Miller moves at almost half the speed of light).
+* **Flight speed** (top of the panel, saved with your settings): *Automatic* follows the distance to
+  the nearest surface, so you can creep along a planet's horizon or cross the system in seconds, times
+  a multiplier you set; *Fixed* holds the speed you choose (shown in km/s, c or light-years a second)
+  wherever you are, starting from the speed you were going. The scroll wheel changes whichever is in
+  use, Shift gives 5x, **T** toggles turbo (its strength from 10x to 10,000x), and *Travel flights*
+  sets how fast the flights to targets and bookmarks go (0.25x slow and scenic to 4x quick).
 
 ## The 3D universe
 
@@ -146,9 +150,10 @@ travel. Distant galaxies are drawn as images oriented as they are in space. Star
 camera become glowing, boiling discs with spots, and planets become lensed spheres.
 
 **Travelling:** the *Travel* panel lists every named star, galaxy and place, with a search box and a
-*Surprise me* button; flights cross any distance in a few seconds. In free flight the speed
-follows the distance to the nearest surface (horizon, planet or star); **T** toggles a 1000x turbo
-for crossing interstellar space by hand.
+*Surprise me* button; flights cross any distance in a few seconds (*Travel flights* in *Flight
+speed* makes them slower or quicker). In free flight the speed follows the distance to the nearest
+surface (horizon, planet or star), or is the fixed speed you set; **T** toggles turbo (1000x by
+default) for crossing interstellar space by hand.
 
 ## Star disruption
 
@@ -276,13 +281,13 @@ pattern comoving with the ejecta. Command line: `--sn N` plays scenario N (1-2) 
 | Space / Ctrl | Up / down |
 | Q / E | Roll |
 | Shift | 5x boost |
-| Scroll | Change base speed (speed also scales with the distance to the nearest surface) |
+| Scroll | Change the flight speed (the multiplier in Automatic, the speed itself in Fixed) |
 | 1-4 | Fly to bookmarks (Interstellar shot, photon-sphere skim, top-down, far) |
 | R | Reset view |
 | O | Auto-orbit |
 | L | Toggle lensing |
 | P | Pause the simulation clock and the disk |
-| T | Turbo: 1000x flight speed |
+| T | Turbo (1000x flight speed by default; set it in Flight speed) |
 | H | Hide the panel |
 | F2 / F3 | Screenshot / cinematic 4K capture (24 accumulated samples) |
 | F5 | Reload shaders (they also hot-reload on save) |

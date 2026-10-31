@@ -62,7 +62,7 @@ public:
     glm::dvec3 velocity() const { return vel_; }
     double lastSpeed() const { return lastSpeed_; }   // full-stick speed used in the last update, M/s
 
-    float baseSpeed = 1.0f;        // user multiplier (scroll wheel)
+    float flightTimeScale = 1.0f;  // flights (flyTo, flyToTarget) take this many times their usual time
     double maxRadius = 20000.0;    // camera cannot go farther from the hole than this (M)
     static constexpr double kMinRadius = 2.3;
 

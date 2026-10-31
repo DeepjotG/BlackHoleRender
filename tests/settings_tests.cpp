@@ -1,5 +1,6 @@
 // Round-trip and preset checks for Settings.
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 
@@ -21,6 +22,21 @@ int main() {
     CHECK(a.save(path), "save settings file");
     Settings b;
     CHECK(b.load(path), "load settings file");
+    {
+        // Flight speed: automatic scales with the nearest surface, fixed does not; turbo multiplies either.
+        bhs::Settings f;
+        const double mPerM = 1.477e11;
+        f.speedMode = 0;
+        f.speedScale = 0.5f;
+        f.turboFactor = 10.0f;
+        CHECK(std::abs(bhs::flightSpeedM(f, 20.0, mPerM, false) - 3.5) < 1e-9 && std::abs(bhs::flightSpeedM(f, 20.0, mPerM, true) - 35.0) < 1e-9,
+              "automatic flight speed: 0.35 x multiplier x nearest surface, turbo x factor");
+        f.speedMode = 1;
+        f.fixedSpeed = 3e9;
+        CHECK(std::abs(bhs::flightSpeedM(f, 20.0, mPerM, false) - 3e9 / mPerM) < 1e-12 &&
+                  bhs::flightSpeedM(f, 20.0, mPerM, false) == bhs::flightSpeedM(f, 5000.0, mPerM, false),
+              "fixed flight speed: the user's m/s whatever is near");
+    }
     CHECK(b.fingerprint() == a.fingerprint(), "fingerprint survives save/load round trip");
     CHECK(b.preset == bhs::PRESET_ULTRA && b.skyResolution == 4096 && b.maxSteps == 700, "ultra preset fields restored");
     CHECK(!b.lensing && b.skySeed == 424242u && b.diskPeakTemp == 7777.0f, "individual fields restored");

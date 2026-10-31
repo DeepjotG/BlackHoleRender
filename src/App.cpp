@@ -233,8 +233,9 @@ int App::run(const Options& opt) {
     onDisk_ = settings_;
     const bool automated = opt.frames > 0 || opt.benchmark;
     automated_ = automated;
-    if (automated) {
-        // Deterministic, UI-free rendering for scripted captures.
+    if (automated && !opt.settingsGiven) {
+        // Deterministic, UI-free rendering for scripted captures (a settings file named with --settings is
+        // used as given).
         settings_ = Settings{};
         settings_.vsync = false;
         settings_.showUi = opt.forceUi;
@@ -407,7 +408,9 @@ void App::onKey(int key, int action, int) {
 void App::onScroll(double dy) {
     if (automated_) return;   // captures must not react to whatever happens on the desktop
     if (!mouseCaptured_ && ui_.wantsMouse()) return;
-    camera_.baseSpeed = std::clamp(camera_.baseSpeed * static_cast<float>(std::pow(1.5, dy)), 1e-4f, 1e9f);
+    // The scroll wheel changes the flight speed in use (the panel's Flight speed), 1.5x a notch, within its slider's range.
+    if (settings_.speedMode == 1) settings_.fixedSpeed = std::clamp(settings_.fixedSpeed * std::pow(1.5, dy), kMinFixedSpeed, kMaxFixedSpeed);
+    else settings_.speedScale = std::clamp(settings_.speedScale * static_cast<float>(std::pow(1.5, dy)), 0.01f, 100.0f);
 }
 
 void App::onMouseButton(int button, int action) {
@@ -1432,9 +1435,12 @@ void App::updateWorld(float dt, const Camera::Input& in) {
         }
     }
 
-    // Flight speed follows the distance to the nearest surface (horizon or planet).
+    // Flight speed (Travel > Flight speed): automatic follows the distance to the nearest surface (horizon,
+    // planet, star or galaxy) times the user's multiplier; fixed is the user's own speed everywhere. Turbo
+    // multiplies either; flights to targets take the user's share of their usual time.
     nearestDist_ = nearestSurfaceDistance(&nearestName_);
-    const double speed = 0.35 * camera_.baseSpeed * std::max(nearestDist_, 1e-12) * (turbo_ ? 1000.0 : 1.0);
+    const double speed = flightSpeedM(settings_, nearestDist_, units::metersPerM(settings_.bhMassSolar), turbo_);
+    camera_.flightTimeScale = 1.0f / std::clamp(settings_.travelSpeed, 0.25f, 4.0f);
     // The painted backdrop keeps the camera within 20,000 M of the hole, except while the supernova or the
     // merger plays (their shots reach far beyond it: deep space, the days after the merger). When one is
     // over, the camera flies home if the event's director was filming (rather than leave it staring at an
@@ -1448,6 +1454,20 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     const bool homeward = camera_.radius() > 20000.0 && (camera_.isTransitioning() || !goToRequest_.empty());
     camera_.maxRadius = settings_.universeMode == 0 && !farEvent && !homeward ? 20000.0 : 1e22;
     camera_.update(dt, in, speed);
+    // Test hook: BHS_DEBUG_FLIGHT logs the flight speed in use every 30 frames, and where flights begin and end.
+    static const bool debugFlight = std::getenv("BHS_DEBUG_FLIGHT") != nullptr;
+    if (debugFlight) {
+        static bool wasFlying = false;
+        if (camera_.isTransitioning() != wasFlying) {
+            wasFlying = camera_.isTransitioning();
+            logInfo("flight {} at frame {}", wasFlying ? "began" : "ended", frameIndex_);
+        }
+        if (frameIndex_ % 30 == 0) {
+            const glm::dvec3 p = camera_.position();
+            logInfo("flight f{} speed {:.6g} M/s ({}) nearest {:.6g} M pos {:.9g} {:.9g} {:.9g}", frameIndex_, speed,
+                    units::formatSpeed(speed * units::metersPerM(settings_.bhMassSolar)), nearestDist_, p.x, p.y, p.z);
+        }
+    }
     wasTransitioning_ = camera_.isTransitioning();
     for (const BodyDesc& b : bodies_)
         if (b.collidable) camera_.pushOutOf(b.pos, b.radius * 1.0003);

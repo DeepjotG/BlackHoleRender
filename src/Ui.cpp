@@ -296,6 +296,44 @@ void Ui::draw(UiContext& c) {
     if (!r.shadersOk()) ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Shader errors: see terminal (F5 to retry)");
     ImGui::TextDisabled(c.mouseCaptured ? "Esc / Tab: release mouse to use the panel" : "Tab or click: capture mouse to fly   Esc: quit");
 
+    // ---- flight speed: automatic (follows the distance to the nearest surface) or the user's own, fixed ----
+    if (ImGui::CollapsingHeader("Flight speed", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const double mPerM = units::metersPerM(s.bhMassSolar);
+        const bool turboOn = c.turbo && *c.turbo;
+        const double nowMps = cam.lastSpeed() * mPerM;   // full stick, turbo included
+        int mode = s.speedMode;
+        ImGui::RadioButton("Automatic", &mode, 0);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slows down near planets, stars and the black hole, speeds up in empty space.");
+        ImGui::SameLine();
+        ImGui::RadioButton("Fixed", &mode, 1);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The same speed everywhere, whatever is near (careful close to planets and the black hole).");
+        if (mode != s.speedMode) {
+            // Fixed starts at the speed you were going, so switching does not jolt the camera.
+            if (mode == 1) s.fixedSpeed = std::clamp(nowMps / (turboOn ? std::max(s.turboFactor, 1.0f) : 1.0f), kMinFixedSpeed, kMaxFixedSpeed);
+            s.speedMode = mode;
+        }
+        if (s.speedMode == 0) {
+            sliderLog("Speed##auto", &s.speedScale, 0.01f, 100.0f, "%.2gx");
+        } else {
+            // A log slider showing the speed in the units of the distances it crosses (km/s, c, ly/s).
+            float lg = static_cast<float>(std::log10(s.fixedSpeed));
+            const std::string shown = units::formatSpeed(s.fixedSpeed);
+            if (ImGui::SliderFloat("Speed##fixed", &lg, static_cast<float>(std::log10(kMinFixedSpeed)), static_cast<float>(std::log10(kMaxFixedSpeed)),
+                                   shown.c_str()))
+                s.fixedSpeed = std::clamp(std::pow(10.0, static_cast<double>(lg)), kMinFixedSpeed, kMaxFixedSpeed);
+        }
+        if (c.turbo) {
+            ImGui::Checkbox("Turbo (T)", c.turbo);
+            ImGui::SameLine();
+            sliderLog("##turbo", &s.turboFactor, 10.0f, 10000.0f, "%.0fx");
+        }
+        ImGui::TextDisabled("Now %s%s. Scroll changes the speed, Shift = 5x.", units::formatSpeed(nowMps).c_str(), turboOn ? " with turbo" : "");
+        sliderLog("Travel flights", &s.travelSpeed, 0.25f, 4.0f, "%.2gx");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How fast the flights in Travel, the planets' Go and the camera bookmarks go: at 1x a flight takes\n"
+                              "1.4 to 8 s (longer trips longer); 0.25x is slow and scenic, 4x is quick.");
+    }
+
     // ---- universe ----
     if (ImGui::CollapsingHeader("Universe", ImGuiTreeNodeFlags_DefaultOpen)) {
         const char* modes[] = {"Painted backdrop", "Invented 3D universe", "Real 3D universe"};
@@ -697,9 +735,7 @@ void Ui::draw(UiContext& c) {
                 c.followName->clear();
             }
         }
-        if (c.turbo) ImGui::Checkbox("Turbo, 1000x (T)", c.turbo);
-        ImGui::TextDisabled("Speed follows the distance to the nearest surface; scroll to change it, Shift = 5x.");
-        ImGui::TextDisabled("For long trips use the list above: flights cross any distance in a few seconds.");
+        ImGui::TextDisabled("Speed, turbo and how fast these flights go: Flight speed, at the top of the panel.");
     }
 
     // ---- quality ----
@@ -800,7 +836,6 @@ void Ui::draw(UiContext& c) {
         ImGui::SliderFloat("Field of view", &s.fovDeg, 30.0f, 120.0f, "%.0f deg");
         ImGui::SliderFloat("Mouse sensitivity", &s.mouseSensitivity, 0.02f, 0.6f, "%.2f");
         ImGui::Checkbox("Invert Y", &s.invertY);
-        sliderLog("Speed multiplier", &cam.baseSpeed, 1e-4f, 1e9f, "%.3g");
         bool orbit = cam.autoOrbit();
         if (ImGui::Checkbox("Auto-orbit (O)", &orbit)) cam.setAutoOrbit(orbit);
         if (orbit) ImGui::SliderFloat("Orbit speed", &cam.autoOrbitSpeed, -0.5f, 0.5f, "%.2f rad/s");

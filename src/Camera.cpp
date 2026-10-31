@@ -105,7 +105,7 @@ void Camera::flyTo(const Bookmark& b, float seconds) {
     fromDir_ = safeNormalize(pos_, glm::dvec3(0, 0, 1));
     toDir_ = safeNormalize(b.pos, glm::dvec3(0, 0, 1));
     const double ratio = std::abs(std::log(toDist_ / fromDist_));
-    transDur_ = std::max(0.05f, std::max(seconds, static_cast<float>(1.2 + 0.25 * ratio)));
+    transDur_ = std::max(0.05f, std::max(seconds, static_cast<float>(1.2 + 0.25 * ratio)) * flightTimeScale);
     fromQ_ = orient_;
     toQ_ = b.orient;
     lookAtPivot_ = false;
@@ -124,7 +124,7 @@ void Camera::flyToTarget(const glm::dvec3& target, double viewDistance, const gl
     toDist_ = std::max(viewDistance, 1e-12);
     const double ratio = std::abs(std::log(toDist_ / fromDist_));
     const double turn = std::acos(std::clamp(glm::dot(fromDir_, toDir_), -1.0, 1.0));
-    transDur_ = static_cast<float>(std::clamp(1.4 + 0.22 * ratio + 0.6 * turn, 1.4, 8.0));
+    transDur_ = static_cast<float>(std::clamp(1.4 + 0.22 * ratio + 0.6 * turn, 1.4, 8.0) * flightTimeScale);
     fromQ_ = orient_;
     toQ_ = lookRotation(target + toDir_ * toDist_, target, glm::vec3(0, 1, 0));
     lookAtPivot_ = true;
