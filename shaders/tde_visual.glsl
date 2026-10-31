@@ -29,8 +29,8 @@ const float ALPHA_MAX = 6.0e4;            // RGBA16F range
 float tdeNoiseFade(float fadeCount) { return clamp(fadeCount / NOISE_PART, 0.0, 1.0); }
 
 // ---- temperature (K) and emission multiplier ----------------------------------------------------
-const float T_STREAM = 3800.0;            // cold debris expanding away from pericentre: warm orange
-const float B_STREAM = 0.45;              // ... and relatively dim
+const float T_STREAM = 4500.0;            // debris expanding away from pericentre: warm orange
+const float B_STREAM = 5.0;               // ... glowing like the star's own gas (its surface is ~1 at Teff)
 const float T_DISK_PERI = 3.0e4;          // gas on circular orbits at 2 r_p ...
 const float T_DISK_SLOPE = 0.75;          // ... hotter inwards as r^-3/4 ...
 const float T_DISK_MIN = 1.0e4;           // ... clamped to 1e4 .. 5e4 K
@@ -71,7 +71,11 @@ vec4 tdeVisual(float rho, float rhoU, vec3 rhoV, float rhoH, vec3 p, float nPart
     float tDisk = clamp(T_DISK_PERI * pow(2.0 * uPoly.z / r, T_DISK_SLOPE), T_DISK_MIN, T_DISK_MAX);
     float T = mix(T_STREAM, tDisk, diskW);
     float b = mix(B_STREAM, B_DISK, diskW);
-    T = mix(T, uVis.y, dense);
+    // Inside dense gas the visible layer's temperature follows the density, as in a star: the middle of a
+    // blob shows deeper, hotter layers than its limb, which shades the torn star like a photosphere
+    // instead of a flat disc of one colour.
+    float tStar = uVis.y * clamp(pow(max(rho / uVis.x, 1e-6), 0.08), 0.6, 1.15);
+    T = mix(T, tStar, dense);
     b = mix(b, 1.0, dense);
     float shock = h * r * r * sqrt(r);
     T *= pow(1.0 + shock, SHOCK_TEMP_EXP);

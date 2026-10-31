@@ -1,0 +1,313 @@
+#version 460 core
+// Turns every star-disruption particle into screen-space splats of its lensed images (the primary one
+// and, with lensing, the secondary one on the far side of the hole), drawn by gas_splat.vert/.frag as
+// glowing, absorbing gas at full screen resolution.
+//
+// Shape: a particle stands for the gas around it, a 3D Gaussian exp(-x^T S^-1 x). Its scale comes from
+// the local particle density, its shape from the spread of the particles in the cell that sets that
+// density (gas_hash.glsl, gas_moments.comp): round in the star, a needle along a thin stream (whose
+// density is then the stream's own, not that of the cell around it). Its optical depth follows from the
+// simulation's absorption per M (tde_visual.glsl): overlapping splats add up to that absorption times
+// the path through the gas. The image is the kernel mapped through the lens (surface brightness is
+// conserved): across the plane through camera, hole and particle it scales by sin(alpha) / (r sin(phi)),
+// within it by the gradient of the lens map; both come from the lens table.
+layout(local_size_x = 128) in;
+#include "tde_params.glsl"
+#include "tde_visual.glsl"
+#include "gas_hash.glsl"
+#include "gas_lens.glsl"
+#include "blackbody.glsl"
+
+layout(std430, binding = 0) readonly buffer PartPos { vec4 pPos[]; };
+layout(std430, binding = 1) readonly buffer PartVel { vec4 pVel[]; };
+layout(std430, binding = 2) readonly buffer PartAux { vec4 pAux[]; };
+struct Splat {
+    vec4 a;   // centre (px), half extent of the quad (px)
+    vec4 b;   // inverse covariance (xx, xy, yy, px^-2), peak optical depth
+    vec4 c;   // emitted colour (HDR)
+};
+layout(std430, binding = 13) writeonly buffer Splats { Splat sOut[]; };
+layout(std430, binding = 14) buffer DrawCmd { uint cmdCount, cmdInstances, cmdFirst, cmdBase; };
+
+uniform sampler2D uLens;
+uniform int uCount;
+uniform float uPartTotal;      // particles the star was made of (each holds 1 / uPartTotal of its mass)
+uniform vec3 uCamPos;
+uniform mat3 uCamBasis;        // columns: right, up, back (as the tracer)
+uniform float uTanHalfFov;
+uniform vec2 uResolution;
+uniform int uLensing;          // 0: straight lines
+uniform float uAlphaCrit;      // the shadow's angular radius at the camera
+uniform float uGasBrightness, uGasOpacity;
+uniform float uRefLen;         // M: gas optically thick over this length counts as dense (gas.glsl uGasRefLen)
+uniform vec3 uDiskFade;        // the disk forming from this gas: x outer radius (M), y slab half-height per radius, z how far formed
+uniform uint uMaxSplats;
+uniform float uMaxExtent;      // px: splats wider than this (sigma) are a uniform haze and are dropped
+
+const float ETA = 1.2;         // kernel radius in mean particle spacings (smaller: lumpier gas)
+const float MIN_PX2 = 2.0;     // smallest image variance (px^2): about a 3 px wide line
+const float MAX_BOOST = 16.0;
+const float BOOST_POWER = 0.6; // how far a sub-pixel image keeps its peak (1) rather than its integral (0)
+const float MAX_ASPECT2 = 64.0;   // a kernel is at most 8x longer than wide
+const float FILAMENT_TAU = 0.6;   // optical depth across a stream drawn as a filament
+const float TARGET_LAYERS = 24.0; // splats stacked per pixel: beyond this a fraction of the particles is drawn
+const float AREA_BUDGET = 3000.0; // px^2 per splat: tenuous gas with huge, faint splats is drawn by a fraction of them
+const float MIN_KEEP = 0.01;
+const float MIN_PEAK = 3e-4;      // peak opacity below which a splat is not worth drawing
+const float OVERDRAW_PX = 16.0;   // the cell (in px) whose particle count estimates the stacking
+
+// Covariance (cell units) of the particles in a moment slot, regularised so no axis is thinner than 1/8
+// of the longest; false when the slot holds fewer than minCount particles.
+bool momentCov(int s, float minCount, out mat3 C, out float m) {
+    int base = s * MOM_WORDS;
+    m = float(mVal[base]);
+    if (m < minCount) return false;
+    vec3 mu = vec3(mVal[base + 1], mVal[base + 2], mVal[base + 3]) / (MOM_SCALE * m);
+    vec3 sq = vec3(mVal[base + 4], mVal[base + 5], mVal[base + 6]) / (MOM_SCALE * m);
+    vec3 cr = vec3(mVal[base + 7], mVal[base + 8], mVal[base + 9]) / (MOM_SCALE * m);
+    C = mat3(sq.x - mu.x * mu.x, cr.x - mu.x * mu.y, cr.y - mu.x * mu.z,
+             cr.x - mu.x * mu.y, sq.y - mu.y * mu.y, cr.z - mu.y * mu.z,
+             cr.y - mu.x * mu.z, cr.z - mu.y * mu.z, sq.z - mu.z * mu.z);
+    float tr = C[0][0] + C[1][1] + C[2][2];
+    C += mat3(tr / MAX_ASPECT2 + 1e-4);
+    return true;
+}
+// The particle's kernel S (M^2), the particle density around it (per M^3), and whether the gas here is
+// a thin stream sampled by few particles (fil 0..1, with its width wFil in M): the particles of the cell
+// that sets this particle's scale lie along a line. A dense stream is not one (its cells are smaller
+// than its width, so they are round inside it): only sparse streams count, which is where the density
+// law fails. The shape measure is the sum of the squared eigenvalues over the squared trace: 1/3 for
+// a sphere, about 1/2 for a pancake (the flattened gas round the hole), towards 1 for a needle.
+mat3 kernel(vec3 p, out float nLocal, out float fil, out float wFil) {
+    uint n;
+    int level = gasLevel(p, n);
+    float c = gasCellSize(level);
+    fil = 0.0;
+    wFil = 1.0;
+    for (int lv = level; lv <= min(level + 1, HASH_LEVELS - 1); ++lv) {
+        int s = momSlot(p, lv, false);
+        if (s < 0) continue;
+        mat3 C;
+        float m;
+        if (!momentCov(s, 6.0, C, m)) continue;
+        float cl = gasCellSize(lv);
+        if (m >= 12.0) {
+            float tr = C[0][0] + C[1][1] + C[2][2];
+            float fro = dot(C[0], C[0]) + dot(C[1], C[1]) + dot(C[2], C[2]);
+            fil = smoothstep(0.7, 0.88, fro / max(tr * tr, 1e-30));
+            // Across a needle the two small eigenvalues are alike: their value is sqrt(det / tr).
+            wFil = 2.35 * pow(max(determinant(C), 1e-30) / max(tr, 1e-30), 0.25) * cl;
+        }
+        C *= cl * cl;
+        float det = max(determinant(C), 1e-30);
+        // A uniform ellipsoid with these second moments has semi-axes sqrt(5 lambda).
+        nLocal = m / (4.18879 * 11.1803 * sqrt(det));
+        float h2 = ETA * ETA * pow(nLocal, -2.0 / 3.0);
+        return C * (h2 / pow(det, 1.0 / 3.0));
+    }
+    nLocal = max(float(n), 1.0) / (c * c * c);
+    return mat3(ETA * ETA * pow(nLocal, -2.0 / 3.0));
+}
+
+// log r of ray i of the fan at table angle j0 + fj.
+float lensRow(int i, int j0, float fj) {
+    return mix(texelFetch(uLens, ivec2(i, j0), 0).r, texelFetch(uLens, ivec2(i, j0 + 1), 0).r, fj);
+}
+
+// Fan coordinate u of the ray reaching log-radius L at swept angle phi (-1: none), with the slopes of
+// log r along the fan (per unit u) and along phi there.
+float lensSolve(float L, float phi, out float Lu, out float Lphi) {
+    const float dPhi = TWO_PI / float(LENS_PHIS - 1);
+    float fy = phi / dPhi;
+    int j0 = clamp(int(floor(fy)), 0, LENS_PHIS - 2);
+    float fj = clamp(fy - float(j0), 0.0, 1.0);
+    int lo = 0, hi = LENS_RAYS - 1;
+    float vlo = lensRow(lo, j0, fj), vhi = lensRow(hi, j0, fj);
+    if (!(vlo < L && L < vhi)) return -1.0;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        float vm = lensRow(mid, j0, fj);
+        if (vm < L) { lo = mid; vlo = vm; }
+        else { hi = mid; vhi = vm; }
+    }
+    float t = clamp((L - vlo) / max(vhi - vlo, 1e-30), 0.0, 1.0);
+    Lu = (vhi - vlo) * float(LENS_RAYS);
+    float sLo = texelFetch(uLens, ivec2(lo, j0 + 1), 0).r - texelFetch(uLens, ivec2(lo, j0), 0).r;
+    float sHi = texelFetch(uLens, ivec2(hi, j0 + 1), 0).r - texelFetch(uLens, ivec2(hi, j0), 0).r;
+    Lphi = mix(sLo, sHi, t) / dPhi;
+    return (float(lo) + 0.5 + t) / float(LENS_RAYS);
+}
+
+// Pixel position of direction d; false behind the camera. J maps a small change of d to pixels.
+bool project(vec3 d, out vec2 px, out mat3x2 J) {
+    mat3 bt = transpose(uCamBasis);
+    vec3 dc = bt * d;
+    float w = -dc.z;
+    if (w < 0.02) return false;
+    float f = uResolution.y / (2.0 * uTanHalfFov);
+    px = 0.5 * uResolution + f * dc.xy / w;
+    // d(px) = f (d(dc).xy / w + dc.xy d(dc).z / w^2), d(dc) = bt d(d)
+    mat3x2 P = mat3x2(f / w, 0.0, 0.0, f / w, f * dc.x / (w * w), f * dc.y / (w * w));
+    J = P * bt;
+    return true;
+}
+
+// Writes the splat of an image at direction d; M maps a 3D displacement at the particle to a change of
+// the image direction, S is the kernel, tau its peak optical depth. Where many particles stack on the
+// same pixels (over = particles in a cell about OVERDRAW_PX wide, that cell's screen area, the kernel's
+// unlensed screen area) only a fraction of them is drawn, each standing for the others: the blending
+// of hundreds of layers per pixel would otherwise dominate the frame.
+void emit(vec3 d, mat3 M, mat3 S, float tau, vec3 col, float pick, vec3 over, float sigStruct) {
+    vec2 px;
+    mat3x2 J;
+    if (!project(d, px, J)) return;
+    mat3x2 JM = J * M;
+    mat2 cov = JM * S * transpose(JM);
+    // Principal axes of the image. Neither may be narrower than a pixel: along the long axis the
+    // integrated optical depth is conserved (the peak drops); across the short one the peak is partly
+    // kept (BOOST_POWER), so a stream thinner than a pixel is drawn as a pixel-wide glowing line that
+    // fades only slowly with its width: keeping the peak outright stacks its splats into an opaque,
+    // hard-edged strip, conserving the integral makes it vanish.
+    float tr = cov[0][0] + cov[1][1];
+    float dt = cov[0][0] * cov[1][1] - cov[0][1] * cov[1][0];
+    float disc = sqrt(max(0.25 * tr * tr - dt, 0.0));
+    float l1 = max(0.5 * tr + disc, 0.0), l2 = max(0.5 * tr - disc, 0.0);
+    vec2 e1 = abs(cov[0][1]) > 1e-12 * max(tr, 1e-30) ? normalize(vec2(l1 - cov[1][1], cov[0][1]))
+                                                       : (cov[0][0] >= cov[1][1] ? vec2(1.0, 0.0) : vec2(0.0, 1.0));
+    vec2 e2 = vec2(-e1.y, e1.x);
+    float l1c = max(l1, MIN_PX2), l2c = max(l2, MIN_PX2);
+    // The peak is kept across the short axis only as far as the structure the splat belongs to is itself
+    // thinner than a pixel (sigStruct, px; 0: unknown, the splat stands for itself).
+    float boostFull = sqrt(l2c / max(l2, 1e-30));
+    float boostCap = sigStruct > 0.0 ? max(sqrt(MIN_PX2) / sigStruct, 1.0) : MAX_BOOST;
+    float boost = pow(min(boostFull, min(boostCap, MAX_BOOST)), BOOST_POWER);
+    float t = tau * sqrt(l1 / l1c) * sqrt(l2 / l2c) * boost;
+    if (t < 1e-5) return;
+    cov = l1c * outerProduct(e1, e1) + l2c * outerProduct(e2, e2);
+    float det = l1c * l2c;
+    float mag = PI * sqrt(max(l1 * l2, 1e-12)) / max(over.z, 1e-12);   // lensing magnification of this image
+    float aCell = over.y * clamp(mag, 0.05, 20.0);
+    float aSplat = PI * sqrt(det);
+    float layers = over.x * aSplat / max(aCell, aSplat);
+    float keep = clamp(min(TARGET_LAYERS / max(layers, 1e-6), AREA_BUDGET / aSplat), MIN_KEEP, 1.0);
+    if (pick >= keep) return;
+    t /= keep;
+    if (t < MIN_PEAK) return;
+    if (max(cov[0][0], cov[1][1]) > uMaxExtent * uMaxExtent) return;   // a uniform haze: not worth drawing
+    vec2 ext = 2.5 * sqrt(vec2(cov[0][0], cov[1][1]));
+    if (any(lessThan(px + ext, vec2(0.0))) || any(greaterThan(px - ext, uResolution))) return;
+    uint slot = atomicAdd(cmdInstances, 1u);
+    if (slot >= uMaxSplats) return;
+    sOut[slot].a = vec4(px, ext);
+    sOut[slot].b = vec4(cov[1][1] / det, -cov[0][1] / det, cov[0][0] / det, t);
+    sOut[slot].c = vec4(col, 0.0);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= uCount) return;
+    vec4 pos = pPos[i];
+    if (!gasParticleDrawn(pos)) return;
+    vec3 p = gasParticlePosition(pos, uFrozen.xyz);
+    if (any(isnan(p)) || any(isinf(p))) return;
+    vec4 vel = pVel[i];
+    vec3 v = vel.xyz + (int(pos.w) == 4 ? uFrozenVel.xyz : vec3(0.0));
+    float heat = max(pAux[i].y, 0.0);
+
+    float nLocal, fil, wFil;
+    mat3 S = kernel(p, nLocal, fil, wFil);
+    float rho = nLocal / uPartTotal;   // star-mass fraction per M^3
+    vec4 vis = tdeVisual(rho, rho * max(vel.w, 0.0), rho * v, rho * heat, p, 1.0);
+    // As in gas.glsl, gas that is not optically thick over the reference length is faint and thin (its
+    // light grows with density squared): the star, its stream and the forming disk glow, while the
+    // tenuous envelope around the hole stays a translucent haze instead of a glowing fog.
+    float dn = clamp(vis.r * uRefLen / 0.2, 0.0, 1.0);
+    // A stream sampled by only a few particles per M (the late inflow, the far end of the outgoing
+    // stream) is far denser than they suggest: a real debris stream stays optically thick however little
+    // mass it carries, so such filaments are drawn as ribbons of their own width. Dense streams keep
+    // the density law (the ribbon rule would make them opaque, flat strips).
+    float sparse = fil * clamp(1.0 - nLocal, 0.0, 1.0);
+    dn = max(dn, sparse);
+    // Below the simulation's resolution the gas is turbulent: thin gas is eroded into patches (about a
+    // third of the pericentre distance across, with finer detail), dense gas stays solid, as gas.glsl
+    // does for the volumes. The same world-space pattern for neighbouring particles keeps it coherent.
+    if (dn < 0.999) {
+        float nd = fbm3(p / (0.35 * max(uEvent.z, 1e-3)), 3, 0.5, 11u);
+        float er = (1.0 - smoothstep(-0.2, 0.2, nd)) * 0.7;   // fbm3 is signed, about +-0.7
+        dn = clamp((dn - er) / max(1.0 - er, 0.05), 0.0, 1.0);
+    }
+    // Billows (as gas.glsl): brighter and darker patches at two scales (a third of the pericentre
+    // distance, and the star's size), slightly hotter and cooler, so opaque gas has texture instead of
+    // a flat colour.
+    float turb = smoothstep(-0.25, 0.25, fbm3(p / (0.35 * max(uEvent.z, 1e-3)) + vec3(7.0), 2, 0.5, 23u));
+    float mottle = smoothstep(-0.2, 0.2, fbm3(p / (0.2 * max(uEvent.y, 1e-6)) + vec3(3.0), 2, 0.5, 29u));
+    vec4 bb = blackbody(vis.g * 1e4 * (0.9 + 0.2 * turb));
+    vec3 col = bb.rgb * (bb.a * vis.b * uGasBrightness * pow(dn, 1.75) * (0.78 + 0.44 * turb) * (0.8 + 0.4 * mottle));   // thin gas glows little: a veil, not fog
+    col /= 1.0 + dot(col, vec3(0.2126, 0.7152, 0.0722)) / 8.0;   // as gas.glsl: flares stay readable
+
+    vec3 rel = p - uCamPos;
+    float D = length(rel);
+    if (D < 1e-6) return;
+    // Peak optical depth: the particle's share of the absorption (alpha / n per particle) over its kernel's
+    // cross-section seen along the line of sight.
+    vec3 u = rel / D;
+    vec3 a = normalize(cross(u, abs(u.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 b = cross(u, a);
+    float saa = dot(a, S * a), sbb = dot(b, S * b), sab = dot(a, S * b);
+    float areaK = PI * sqrt(max(saa * sbb - sab * sab, 1e-30));   // the kernel's cross-section seen from here (M^2)
+    float tau = vis.r * dn * uGasOpacity / (nLocal * areaK);
+    // Across a filament the splats stack nLocal * areaK * wFil deep: whatever the sampling, the total
+    // optical depth across the stream comes to FILAMENT_TAU.
+    tau = max(tau, sparse * FILAMENT_TAU / max(nLocal * areaK * wFil, 1.0));
+    // As the disk forms the gas condenses into it: particles within the disk's extent give way to it
+    // entirely, the hot cloud round the hole largely.
+    float rcyl = length(p.xz);
+    if (uDiskFade.z > 0.0) {
+        bool inDisk = rcyl < uDiskFade.x && abs(p.y) < uDiskFade.y * rcyl + 0.5;
+        tau *= 1.0 - uDiskFade.z * (inDisk ? 1.0 : 0.7);
+    }
+
+    float rt = length(p);
+    float pick = hash1u(uint(i) * 2654435761u + 17u);
+    // Stacking estimate: the particles within a cell about OVERDRAW_PX wide at this distance.
+    float focal = uResolution.y / (2.0 * uTanHalfFov);
+    int lvO = clamp(int(round(log2(max(OVERDRAW_PX * D / focal, 1e-30) / uCell0))), 0, HASH_LEVELS - 1);
+    float cellPx = gasCellSize(lvO) * focal / D;
+    vec3 over = vec3(float(hashCount(p, lvO)), cellPx * cellPx, (focal / D) * (focal / D) * areaK);
+    float sigStruct = sparse > 0.5 ? wFil / 2.35 * focal / D : 0.0;
+    if (uLensing == 0 || rt >= LENS_RMAX * 0.9) {
+        emit(u, (mat3(1.0) - outerProduct(u, u)) / D, S, tau, col, pick, over, sigStruct);
+        return;
+    }
+    float rc = length(uCamPos);
+    vec3 ch = uCamPos / rc;
+    vec3 ph = p / rt;
+    float cphi = clamp(dot(ch, ph), -1.0, 1.0);
+    float sinPhi = sqrt(max(1.0 - cphi * cphi, 0.0));
+    float phiT = acos(cphi);
+    vec3 e = ph - cphi * ch;
+    e = sinPhi > 1e-6 ? e / sinPhi : normalize(cross(ch, abs(ch.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 tHat = cross(ch, e);                   // normal of the plane through camera, hole and particle
+    vec3 phiHat = -sinPhi * ch + cphi * e;      // direction of increasing phi at the particle
+    float L = log(rt);
+    for (int k = 0; k < 2; ++k) {
+        float sgn = k == 0 ? 1.0 : -1.0;        // the secondary image goes round the other side, mirrored
+        float Lu, Lphi;
+        float uu = lensSolve(L, k == 0 ? phiT : TWO_PI - phiT, Lu, Lphi);
+        if (uu < 0.0) continue;
+        float al = lensAlpha(uu, uAlphaCrit);
+        float La = Lu / max(lensDAlphaDu(uu, uAlphaCrit), 1e-20);
+        La = sign(La) * max(abs(La), 1e-20);
+        float sA = sin(al);
+        vec3 d = -cos(al) * ch + sA * sgn * e;
+        vec3 dA = sin(al) * ch + cos(al) * sgn * e;   // change of d per unit alpha
+        // alpha(r, phi): d alpha = (dr / r - Lphi dphi) / La; dphi = sgn (dx . phiHat) / r
+        vec3 g = (ph - sgn * Lphi * phiHat) / (rt * La);
+        // Across the plane: an image that is a long arc is drawn as its central part (an ellipse cannot
+        // follow the ring).
+        float kT = sinPhi > 1e-6 ? sgn * sA / (rt * sinPhi) : length(g);
+        float maxT = 0.35 * max(sA, 1e-4) / sqrt(max(dot(tHat, S * tHat), 1e-30));
+        kT = sign(kT) * min(abs(kT), maxT);
+        emit(d, outerProduct(dA, g) + kT * outerProduct(tHat, tHat), S, tau, col, pick, over, sigStruct);
+    }
+}

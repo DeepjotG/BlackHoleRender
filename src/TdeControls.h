@@ -24,15 +24,15 @@ struct TdeScenario {
     double bhMassSolar;
     int starPreset;
     double beta;
-    double inclinationDeg;
+    double inclinationDeg;         // orbit tilt from the disk plane (all 0: see TdeControls::inclinationDeg)
 };
 
 inline const TdeScenario kTdeScenarios[] = {
-    {"Sun-like star vs Sagittarius A* (close, strongly lensed)", 4.297e6, 0, 2.0, 25.0},
-    {"Red giant vs Gargantua", 1e8, 2, 3.0, 20.0},
-    {"Red supergiant vs Gargantua", 1e8, 3, 2.0, 30.0},
-    {"Sun-like star vs Gargantua (swallowed whole)", 1e8, 0, 1.0, 15.0},
-    {"White dwarf vs an intermediate-mass hole", 1e4, 5, 1.5, 20.0},
+    {"Sun-like star vs Sagittarius A* (close, strongly lensed)", 4.297e6, 0, 2.0, 0.0},
+    {"Red giant vs Gargantua", 1e8, 2, 3.0, 0.0},
+    {"Red supergiant vs Gargantua", 1e8, 3, 2.0, 0.0},
+    {"Sun-like star vs Gargantua (swallowed whole)", 1e8, 0, 1.0, 0.0},
+    {"White dwarf vs an intermediate-mass hole", 1e4, 5, 1.5, 0.0},
 };
 inline constexpr int kTdeScenarioCount = static_cast<int>(sizeof(kTdeScenarios) / sizeof(kTdeScenarios[0]));
 inline constexpr int kTdeScenarioCustom = kTdeScenarioCount;   // "Custom": the star and orbit as set by hand
@@ -42,7 +42,7 @@ struct TdeControls {
     int starPreset = 0;
     double massSolar = 1.0, radiusSolar = 1.0, teff = 5772.0, polytropeN = 3.0;
     double beta = 2.0;
-    double inclinationDeg = 25.0;
+    double inclinationDeg = 0.0;   // in the disk plane: the debris disk forms where the steady one was
     double longitudeDeg = 200.0;
     bool retrograde = false;
     int particles = 262144;

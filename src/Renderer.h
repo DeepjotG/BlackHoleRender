@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "GasParticles.h"
 #include "Shader.h"
 
 namespace bhs {
@@ -31,6 +32,8 @@ struct FrameInput {
     bool resetAccumulation = false;
     bool diskAnimating = true;
     float diskFade = 1.0f;        // 0..1: the steady accretion disk fades out during a star disruption
+    bool debrisDisk = false;      // ... and the disk built by its debris is drawn instead (faded by diskFade)
+    float debrisRing = 18.0f;     // M: where the returning gas circularises; the disk spreads inward from there
     GLuint targetFbo = 0;   // final framebuffer (0 = window)
     float extraGpuMs = 0.0f; // GPU work outside the renderer (bridge readback), for frame-time targets
     const std::vector<struct BodyGpu>* bodies = nullptr;
@@ -38,6 +41,7 @@ struct FrameInput {
     const GasVolumeRef* gas = nullptr;
     int gasCount = 0;
     float gasRefLen = 1.0f;       // M, see uGasRefLen in gas.glsl
+    const GasParticlesRef* particles = nullptr;   // star-disruption particles, drawn instead of the volumes
     // 3D universe sky (see UniverseScene)
     bool universe = false;
     GLuint uniCube = 0, uniStars = 0, uniTiles = 0;
@@ -68,6 +72,9 @@ public:
     float autoExposureGain() const { return autoGain_; }
     const std::string& shaderLog() const { return shaderLog_; }
     bool shadersOk() const;
+    bool gasParticlesOk() const { return gasParticles_.valid(); }
+    const GasParticleStats& gasParticleStats() const { return gasParticles_.stats(); }
+    void resetGasParticleStats() { gasParticles_.resetStats(); }
 
 private:
     struct Target {
@@ -88,6 +95,7 @@ private:
     void upscalePass(const FrameInput& in, const Target& src, Target& dst);
     void bloomPass(const FrameInput& in, const Target& src);
     void compositePass(const FrameInput& in, const Target& hdr, GLuint dstFbo, int w, int h);
+    void particlePass(const FrameInput& in, const Target& hdr);
     void updateAutoExposure(const FrameInput& in, const Target& hdr);
 
     // Tracer variants: with/without body code and with/without gas code.
@@ -103,6 +111,7 @@ private:
     bool gasOccOk_ = false;
     int gasPeakFrame_ = 0;
     void smoothGas(const FrameInput& in);
+    GasParticleRenderer gasParticles_;
     ShaderProgram accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
     ShaderProgram& traceFor(const FrameInput& in);
     Target trace_, accum_[2], upscaled_, lumaProbe_, captureOut_;

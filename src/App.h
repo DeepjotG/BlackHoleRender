@@ -11,6 +11,7 @@
 #include "Renderer.h"
 #include "Settings.h"
 #include "TdeControls.h"
+#include "TdeDirector.h"
 #include "CatalogFetch.h"
 #include "UniverseScene.h"
 #include "tde/TdeSim.h"
@@ -106,7 +107,9 @@ private:
     void applyUniverseSettings();
     TdeControls tdeCtl_;
     std::vector<GasVolumeRef> gasRefs_;
-    void updateTde(double dtM);
+    GasParticlesRef gasParticles_;     // the disruption's particles, drawn instead of its volumes
+    void updateTde(double dtM, double dtReal);
+    TdeDirector director_;              // paces, frames and captions a star disruption
     std::vector<BodyDesc> bodies_;
     std::vector<BodyGpu> bodiesGpu_;
     double simSeconds_ = 0.0;            // simulated coordinate time since start (s)
@@ -139,15 +142,9 @@ private:
     double fixedDt_ = 0.0;               // --dt: fixed frame time for reproducible captures
     double tdeWarp_ = 0.0;               // the star disruption's own clock while its auto warp runs (0: none)
     double swallowedAt_ = -1.0;          // real time when a star swallowed whole was gone (auto clear)
-    int tdePhase() const;                // see UiContext::tdePhase
     void saveSettings();                 // saves settings with the user's own time warp
     float diskFade_ = 1.0f;              // the steady disk fades out while a star disruption plays
-    int watchPhase_ = 0;                 // star disruption camera: 0 off, 1 riding with the star, 2 pulled back
-    glm::dvec3 watchPrev_{0.0};
-    glm::dvec3 watchOffset_{0.0};        // camera position relative to the star while riding along
-    glm::dvec3 watchNormal_{0.0, 1.0, 0.0};   // the star's orbit normal
-    double watchLook_ = 0.15;           // how far from the debris towards the hole the camera aims (0..1)
-    double watchPeriM_ = 0.0;             // disk flow clock in M, wrapped to the cross-fade period
+    float debrisFade_ = 0.0f;            // ... and the disk the debris builds forms (a ring spreading inward)
     double reloadTimer_ = 0.0;
     double skyDirtyFor_ = 0.0;
     int lastDebugView_ = 0;

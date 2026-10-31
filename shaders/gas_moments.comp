@@ -1,0 +1,37 @@
+#version 460 core
+// Second moments of the particles' positions in the cells that set their sizes (gas_hash.glsl): every
+// particle adds itself to its own level's cell and to the next coarser one, so a cell's statistics
+// include the denser clumps inside it.
+layout(local_size_x = 256) in;
+#include "tde_params.glsl"
+#include "gas_hash.glsl"
+
+layout(std430, binding = 0) readonly buffer PartPos { vec4 pPos[]; };
+uniform int uCount;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= uCount) return;
+    vec4 pos = pPos[i];
+    if (!gasParticleDrawn(pos)) return;
+    vec3 p = gasParticlePosition(pos, uFrozen.xyz);
+    if (any(isnan(p)) || any(isinf(p))) return;
+    uint n;
+    int level = gasLevel(p, n);
+    for (int lv = level; lv <= min(level + 1, HASH_LEVELS - 1); ++lv) {
+        int s = momSlot(p, lv, true);
+        if (s < 0) continue;
+        vec3 d = cellOffset(p, lv);
+        int base = s * MOM_WORDS;
+        atomicAdd(mVal[base + 0], 1);
+        atomicAdd(mVal[base + 1], int(d.x * MOM_SCALE));
+        atomicAdd(mVal[base + 2], int(d.y * MOM_SCALE));
+        atomicAdd(mVal[base + 3], int(d.z * MOM_SCALE));
+        atomicAdd(mVal[base + 4], int(d.x * d.x * MOM_SCALE));
+        atomicAdd(mVal[base + 5], int(d.y * d.y * MOM_SCALE));
+        atomicAdd(mVal[base + 6], int(d.z * d.z * MOM_SCALE));
+        atomicAdd(mVal[base + 7], int(d.x * d.y * MOM_SCALE));
+        atomicAdd(mVal[base + 8], int(d.x * d.z * MOM_SCALE));
+        atomicAdd(mVal[base + 9], int(d.y * d.z * MOM_SCALE));
+    }
+}

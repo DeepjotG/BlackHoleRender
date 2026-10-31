@@ -102,6 +102,21 @@ public:
     double starRadiusM() const;
     double starTeff() const;
 
+    // Read-only access to the gas particles, for renderers that draw them at their own resolution (layouts
+    // in shaders/tde_common.glsl): one vec4 per particle in pos (xyz, w = state), vel (xyz proper velocity,
+    // w = internal energy) and aux (x entropy, y heating rate, z internal energy, w density rho'); params is
+    // the uniform block TdeParams (bind [paramsOffset, paramsOffset + paramsSize) at binding 3). grids are
+    // the simulation's boxes (xyz centre, w half size, <= 0 inactive): 0 follows the debris, 1..3 are the
+    // black-hole-centred nest. count is 0 before release and after the event.
+    struct ParticleView {
+        GLuint pos = 0, vel = 0, aux = 0, params = 0;
+        GLintptr paramsOffset = 0;
+        GLsizeiptr paramsSize = 0;
+        int count = 0;
+        glm::vec4 grids[4]{};
+    };
+    ParticleView particles() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

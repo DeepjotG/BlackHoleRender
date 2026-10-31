@@ -167,24 +167,35 @@ The gas is rendered with the same lensing as everything else.
 * **Auto time warp** keeps the event watchable: the fall-in takes days to centuries of simulated
   time depending on the scenario, and the debris keeps returning for much longer. The event runs on
   its own clock (shown in the panel); the planets and the rest of the world keep your time warp.
-* **What it is doing** is spelled out in the panel: falling in, being torn apart, the stream (half
-  of the gas escapes), and the bound half falling back about half a minute later.
-* **The camera** rides along with the star as it falls in, the black hole looming behind it; once
-  the star is torn apart it swings above the orbit to show the stretching debris side-on next to
-  the hole, pulls back while the stream flies off, and comes in close when the bound debris falls
-  back and wraps the hole in a glowing, lensed cocoon of hot gas. Fly or look around at any time to
-  take over.
+* **What it is doing** is captioned at the bottom of the screen (and in the panel), in five stages:
+  falling in; torn apart (slow motion through the closest approach); the stream flies out (a
+  time-lapse, weeks in seconds, that brakes just before the gas comes back, predicted from the
+  debris' orbits); falling back (the returning gas crashes into the stream still falling in and
+  heats up); feeding the black hole (the gas settles into a disk and spirals in). The whole event
+  takes about a minute and a half.
+* **The camera** films the event in three shots joined by cuts through black, so each change of
+  view is deliberate: riding with the star, a fixed distance from it, as it falls in (the black hole
+  looming behind it), is squeezed and stretched at the closest approach, and lengthens into a stream
+  flowing past the camera (a Sun-like star is a twentieth of the shadow's size, so the tearing is a
+  close-up); riding behind the departing stream with the hole shrinking in the distance; and a slow
+  push-in over the hole as the gas comes back, circles it in a ring and spreads into the disk. Fly
+  or look around at any time to take over; *Watch* hands the camera back.
 * **The steady accretion disk fades out** during an event (a real disruption happens around a quiet
-  black hole and builds its own disk from the debris); *Clear* brings it back (it also returns by
-  itself after a star is swallowed whole), and *Keep the steady disk* keeps it. The disk's on/off
-  switch and rotation speed are in the *Black hole & time* section.
-* **Gas brightness and opacity** (Quality panel) scale the debris' glow and absorption.
+  black hole and builds its own disk from the debris): the returning gas circularises in a ring at
+  about twice the pericentre distance, which spreads inward and brightens into the disk again while
+  the hot cloud around the hole condenses into it, spiralling inwards. *Clear* ends the event (the
+  disk also returns by itself after a star is swallowed whole), and *Keep the steady disk* keeps it
+  throughout. The disk's on/off switch and rotation speed are in the *Black hole & time* section.
+* **Gas brightness and opacity** (Star disruption panel) scale the debris' glow and absorption.
 
 How it is simulated: until it reaches about twice the tidal radius the star moves rigidly on an
 exact Schwarzschild orbit; then it becomes 262,144 particles (a polytrope in hydrostatic balance)
 whose pressure, shock heating, cooling and self-gravity are computed on nested 64^3 grids around
 the star and the hole, with general-relativistic orbits for every particle and accretion at the
-horizon. The grids are ray-marched into the same lensed image as everything else.
+horizon. The gas is drawn from the particles themselves: each becomes a small, soft splat at the
+places the black hole's lensing shows it (its direct image and the one round the far side of the
+hole), so the torn star stays sharp however near or far the camera is, and a stream thinner than a
+pixel is drawn as a pixel-wide line, as an optically thick stream would look.
 
 ## Controls
 

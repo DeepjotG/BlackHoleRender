@@ -120,6 +120,8 @@ add_executable(blackhole
   src/App.cpp
   src/Shader.cpp
   src/Renderer.cpp
+  src/GasParticles.cpp
+  src/TdeDirector.cpp
   src/SkyBaker.cpp
   src/DiskTextures.cpp
   src/Ui.cpp
@@ -178,3 +180,6 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/tde_tests.cpp)
   target_link_libraries(tde_tests PRIVATE bhs_core)
   add_test(NAME tde_tests COMMAND tde_tests)
 endif()
+add_executable(tde_director_tests tests/tde_director_tests.cpp src/TdeDirector.cpp)
+target_link_libraries(tde_director_tests PRIVATE bhs_core glad_gl_core_46)
+add_test(NAME tde_director_tests COMMAND tde_director_tests)

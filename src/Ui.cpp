@@ -138,6 +138,29 @@ const char* lookName(universe::PlanetLook l) {
         default: return "lava world";
     }
 }
+// The star disruption's stage, captioned at the bottom of the screen like a documentary.
+void drawTdeCaption(const UiContext& c) {
+    if (!c.tdeActive) return;
+    if (c.tdeFade > 0.001f) {   // a cut between two shots: through black
+        const ImGuiViewport* v = ImGui::GetMainViewport();
+        ImGui::GetBackgroundDrawList()->AddRectFilled(v->Pos, ImVec2(v->Pos.x + v->Size.x, v->Pos.y + v->Size.y),
+                                                      IM_COL32(0, 0, 0, static_cast<int>(255.0f * std::min(c.tdeFade, 1.0f))));
+    }
+    if (!c.tdeTitle || !*c.tdeTitle) return;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 0.5f * vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y - 28.0f), ImGuiCond_Always,
+                            ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(720.0f, vp->WorkSize.x - 40.0f), 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
+    if (ImGui::Begin("##tdeCaption", nullptr, flags)) {
+        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.tdeTitle);
+        if (c.tdeCaption && *c.tdeCaption) ImGui::TextWrapped("%s", c.tdeCaption);
+    }
+    ImGui::End();
+}
+
 }  // namespace
 
 void Ui::drawMarkers(UiContext& c) {
@@ -335,7 +358,7 @@ void Ui::draw(UiContext& c) {
             ImGui::SliderFloat("Disk rotation", &s.diskSpeed, 0.0f, 10.0f, "%.2fx");
         }
         if (diskOn && c.diskHidden)
-            ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Hidden while the star disruption plays: press Clear there to bring it back.");
+            ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Hidden while the star disruption plays; it grows back from the debris later in the event (or press Clear).");
         if (diskOn && s.paused) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the disk and the clock are stopped.");
         if (s.universeMode == 2 && c.simJulianDate > 0.0) {
             const double unix = (c.simJulianDate - 2440587.5) * 86400.0;
@@ -427,6 +450,7 @@ void Ui::draw(UiContext& c) {
         sliderLogD("Penetration (beta)", &t.beta, 0.5, 10.0, "%.2f");
         const double incMin = -80.0, incMax = 80.0;
         ImGui::SliderScalar("Orbit tilt (deg)", ImGuiDataType_Double, &t.inclinationDeg, &incMin, &incMax, "%.0f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: in the plane of the accretion disk, where the debris settles into a new disk.");
         ImGui::Checkbox("Retrograde", &t.retrograde);
         const double after[6] = {t.massSolar, t.radiusSolar, t.teff, t.beta, t.inclinationDeg, t.retrograde ? 1.0 : 0.0};
         for (int i = 0; i < 6; ++i)
@@ -456,21 +480,14 @@ void Ui::draw(UiContext& c) {
         if (c.tdeActive && c.tdeStats) {
             const tde::TdeStats& st = *c.tdeStats;
             const double sPerM = units::secondsPerM(s.bhMassSolar);
-            static const char* phases[] = {
-                "",
-                "Falling in: the black hole is pulling the star in.",
-                "Being torn apart by the tides!",
-                "Torn into a long stream: half the gas escapes, the other half is bound and falls back in about half a minute.",
-                "Falling back: the debris crashes into itself and wraps the black hole in hot gas.",
-                "Swallowed whole: this black hole is too big to tear this star apart (try a red giant, or Sagittarius A*).",
-            };
-            ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", phases[std::clamp(c.tdePhase, 0, 5)]);
+            if (c.tdeTitle && *c.tdeTitle) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.tdeTitle);
+            if (c.tdeCaption && *c.tdeCaption) ImGui::TextWrapped("%s", c.tdeCaption);
             ImGui::Text("%s after spawn   event clock: 1 s = %s", units::formatDuration(st.timeM * sPerM).c_str(),
                         units::formatDuration(c.tdeWarp).c_str());
             ImGui::Text("bound %.0f%%   eaten %.1f%%   escaping %.0f%%   particles %d", 100.0 * st.boundFraction,
                         100.0 * st.accretedFraction, 100.0 * st.escapedFraction, st.activeParticles);
             ImGui::ProgressBar(static_cast<float>(std::min(1.0, st.dissipationRel)), ImVec2(-1.0f, 0.0f), "collision heating");
-            if (c.diskHidden) ImGui::TextDisabled("The steady accretion disk is hidden during the event: Clear brings it back.");
+            if (c.diskHidden) ImGui::TextDisabled("The steady disk is hidden during the event; it grows back as the debris settles (Clear ends the event).");
             ImGui::TextDisabled("The planets keep your own time warp; only the event runs faster.");
         }
         sliderLog("Gas brightness", &s.gasBrightness, 0.5f, 200.0f);
@@ -646,6 +663,7 @@ void Ui::draw(UiContext& c) {
         ImGui::BulletText("F2: screenshot   F3: cinematic capture   F5: reload shaders");
     }
     ImGui::End();
+    drawTdeCaption(c);
 }
 
 }  // namespace bhs

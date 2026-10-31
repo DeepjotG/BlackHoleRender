@@ -1198,4 +1198,19 @@ glm::dvec3 TdeSim::starVelocity() const { return impl_->velocity(); }
 double TdeSim::starRadiusM() const { return impl_->ev.R; }
 double TdeSim::starTeff() const { return impl_->star.teff; }
 
+TdeSim::ParticleView TdeSim::particles() const {
+    ParticleView v;
+    const Impl& m = *impl_;
+    if (!m.spawned || m.finished || !m.released || m.count <= 0 || m.uboStride == 0) return v;
+    v.pos = m.bufPos;
+    v.vel = m.bufVel;
+    v.aux = m.bufAux;
+    v.params = m.bufUbo;
+    v.paramsOffset = static_cast<GLintptr>(((m.uboSlot + Impl::kUboSlots - 1) % Impl::kUboSlots) * m.uboStride);   // the last written slot
+    v.paramsSize = static_cast<GLsizeiptr>(sizeof(ParamsUbo));
+    v.count = m.count;
+    for (int g = 0; g < 4 && g < kGrids; ++g) v.grids[g] = glm::vec4(m.geomDep[g]);
+    return v;
+}
+
 }  // namespace bhs::tde

@@ -47,6 +47,7 @@ void Renderer::shutdown() {
     for (ShaderProgram* p : {&traceProg_, &traceBodiesProg_, &traceGasProg_, &traceGasBodiesProg_, &accumProg_, &upscaleProg_, &bloomDownProg_, &bloomUpProg_, &compositeProg_, &gasBlurProg_, &gasPeakProg_}) p->destroy();
     if (gasPeakBuf_[0]) glDeleteBuffers(2, gasPeakBuf_);
     if (gasOccBuf_) glDeleteBuffers(1, &gasOccBuf_);
+    gasParticles_.destroy();
     for (auto& pair : gasSmooth_)
         if (pair[0]) glDeleteTextures(2, pair);
     destroyTarget(trace_);
@@ -98,6 +99,7 @@ bool Renderer::reloadShaders() {
         ok = false;
         shaderLog_ += gasPeakProg_.log();
     }
+    if (!gasParticles_.load(shaderLog_)) ok = false;   // without it the gas is drawn from the volumes
     if (ok) logInfo("shaders compiled");
     accumCount_ = 0;
     return ok;
@@ -112,6 +114,7 @@ bool Renderer::checkShaderReload() {
             shaderLog_ = p->log();
         }
     }
+    if (gasParticles_.reloadIfChanged(shaderLog_)) any = true;
     if (any) {
         logInfo("shaders hot-reloaded{}", shaderLog_.empty() ? "" : " (with errors)");
         accumCount_ = 0;
@@ -192,6 +195,44 @@ void Renderer::updateDynamicScale(const FrameInput& in) {
     }
 }
 
+// The gas brightness setting; BHS_GAS_BRIGHTNESS overrides it (tuning captures).
+static float gasBrightness(const Settings& s) {
+    static const float over = std::getenv("BHS_GAS_BRIGHTNESS") ? static_cast<float>(std::atof(std::getenv("BHS_GAS_BRIGHTNESS"))) : -1.0f;
+    return over > 0.0f ? over : s.gasBrightness;
+}
+
+// The disk the debris builds: the returning gas circularises in a ring at in.debrisRing (physically about
+// twice the pericentre distance), which spreads inward to the inner edge and settles to the user's own disk
+// as in.diskFade goes from 0 to 1 (a cross-fade would not read as gas forming a disk).
+static void debrisDiskExtent(const FrameInput& in, float& inner, float& outer) {
+    const Settings& s = *in.settings;
+    const float p = std::clamp(in.diskFade, 0.0f, 1.0f);
+    const float ring = std::min(in.debrisRing, 0.9f * s.diskOuter);
+    inner = glm::mix(ring, s.diskInner, std::pow(p, 0.7f));
+    outer = glm::mix(std::max(s.diskOuter, 1.4f * ring), s.diskOuter, p);
+}
+
+void Renderer::particlePass(const FrameInput& in, const Target& hdr) {
+    if (!in.particles || in.particles->count <= 0) return;
+    const Settings& s = *in.settings;
+    GasDrawParams v;
+    v.camPos = glm::vec3(in.camera->position());
+    v.camBasis = in.camera->basis();
+    v.tanHalfFov = std::tan(glm::radians(s.fovDeg) * 0.5f);
+    v.lensing = s.lensing && !in.farMode;
+    v.brightness = gasBrightness(s);
+    v.opacity = s.gasOpacity;
+    v.blackbodyLut = in.blackbodyLut;
+    if (in.debrisDisk) {
+        float dInner = s.diskInner, dOuter = s.diskOuter;
+        debrisDiskExtent(in, dInner, dOuter);
+        v.diskOuter = dOuter;
+        v.diskSlab = 2.5f * s.diskThickness;
+        v.diskPresence = std::clamp(in.diskFade, 0.0f, 1.0f);
+    }
+    gasParticles_.draw(*in.particles, v, hdr.fbo, hdr.w, hdr.h);
+}
+
 void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const glm::vec2& jitter) {
     const Settings& s = *in.settings;
     const Camera& cam = *in.camera;
@@ -235,9 +276,7 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     // Star-disruption gas volumes on texture units 4..7.
     const int ng = (in.gas && in.gasCount > 0) ? std::min(in.gasCount, 4) : 0;
     p.set("uGasCount", ng);
-    // BHS_GAS_BRIGHTNESS overrides the setting (tuning captures).
-    static const float gbOverride = std::getenv("BHS_GAS_BRIGHTNESS") ? static_cast<float>(std::atof(std::getenv("BHS_GAS_BRIGHTNESS"))) : -1.0f;
-    p.set("uGasBrightness", gbOverride > 0.0f ? gbOverride : s.gasBrightness);
+    p.set("uGasBrightness", gasBrightness(s));
     p.set("uGasRefLen", in.gasRefLen);
     {
         glm::vec3 ulo(1e30f), uhi(-1e30f);
@@ -271,19 +310,28 @@ void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const g
     p.set("uDiskStep", s.diskStep);
     // During a star disruption the steady disk fades out; once gone it is not marched at all (its fine
     // slab steps are a large share of the frame), and while fading its absorption fades with its light.
-    p.set("uDiskMode", in.diskFade > 0.01f ? s.diskMode : DISK_NONE);
+    // The disk the debris builds is the user's own disk again (same look): a ring where the gas circularises
+    // that spreads inward and brightens as the gas settles, spiralling inwards while it feeds the hole.
+    const bool debris = in.debrisDisk;
+    float dInner = s.diskInner, dOuter = s.diskOuter;
+    if (debris) debrisDiskExtent(in, dInner, dOuter);
+    const float fadeNow = std::clamp(in.diskFade, 0.0f, 1.0f);
+    const float strength = debris ? std::sqrt(fadeNow) : fadeNow;
+    const int diskMode = debris && s.diskMode == DISK_NONE ? DISK_VOLUMETRIC : s.diskMode;
+    p.set("uDiskMode", in.diskFade > 0.01f ? diskMode : DISK_NONE);
+    p.set("uDiskInflow", debris ? 0.08f : 0.0f);
     p.set("uDopplerStrength", s.dopplerStrength);
     p.set("uShadowOverlay", s.showShadowOverlay ? 1 : 0);
     p.set("uPixelOmega0", pixelAngle * pixelAngle);
     p.set("uPixelAngle", pixelAngle);
     p.set("uDebugView", in.debugView);
-    p.set("uDiskInner", s.diskInner);
-    p.set("uDiskOuter", s.diskOuter);
+    p.set("uDiskInner", dInner);
+    p.set("uDiskOuter", dOuter);
     p.set("uDiskThickness", s.diskThickness);
     p.set("uDiskDensity", s.diskDensity);
-    p.set("uDiskOpacity", s.diskOpacity * std::clamp(in.diskFade, 0.0f, 1.0f));
+    p.set("uDiskOpacity", s.diskOpacity * strength);
     p.set("uDiskPeakTemp", s.diskPeakTemp);
-    p.set("uDiskBrightness", s.diskBrightness * in.diskFade);
+    p.set("uDiskBrightness", s.diskBrightness * strength);
     p.set("uDiskNoiseScale", s.diskNoiseScale);
     p.set("uDiskNoiseStrength", s.diskNoiseStrength);
     p.set("uDiskWarmth", s.diskWarmth);
@@ -628,6 +676,7 @@ void Renderer::render(const FrameInput& in) {
     const Target* hdrInternal = &trace_;
     if (accumulate) hdrInternal = &accumulatePass(in, trace_, sample, cap);
     upscalePass(in, *hdrInternal, upscaled_);
+    particlePass(in, upscaled_);
     bloomPass(in, upscaled_);
     updateAutoExposure(in, upscaled_);
     compositePass(in, upscaled_, in.targetFbo, in.windowW, in.windowH);
@@ -652,6 +701,7 @@ bool Renderer::captureHighRes(const FrameInput& in, int width, int height, int s
         if ((sIdx + 1) % 4 == 0 || sIdx + 1 == samples) logInfo("  sample {}/{}", sIdx + 1, samples);
     }
     upscalePass(in, *hdr, upscaled_);
+    particlePass(in, upscaled_);
     bloomPass(in, upscaled_);
     compositePass(in, upscaled_, captureOut_.fbo, width, height);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, captureOut_.fbo);

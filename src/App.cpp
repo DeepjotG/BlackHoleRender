@@ -471,12 +471,24 @@ void App::frame() {
     }
     static const bool noGas = std::getenv("BHS_NO_GAS") != nullptr;   // debug: simulate but do not draw the gas
     if (noGas) gasRefs_.clear();
+    // The gas is drawn from the particles themselves (sharp at any distance); the volumes stay as the
+    // fallback when the particle shaders are unavailable, or on request (BHS_GAS_VOLUMES, comparisons).
+    static const bool volumes = std::getenv("BHS_GAS_VOLUMES") != nullptr;
+    const tde::TdeSim::ParticleView pv = tde_.particles();
+    if (pv.count > 0 && !noGas && !volumes && renderer_.gasParticlesOk()) {
+        gasParticles_ = {pv.pos, pv.vel, pv.aux, pv.params, pv.paramsOffset, pv.paramsSize, pv.count,
+                         static_cast<float>(tde_.starRadiusM()), static_cast<float>(director_.nearRadiusM()), 1.0f,
+                         tde_.stats().timeM, static_cast<float>(director_.farRadiusM()), static_cast<float>(director_.returnFraction())};
+        fi.particles = &gasParticles_;
+        gasRefs_.clear();
+    }
     fi.gas = gasRefs_.data();
     fi.gasCount = static_cast<int>(gasRefs_.size());
     // 8 star radii: longer lengths make the coarse grids' smeared copy of the debris glow and absorb, which
     // hides the torn star behind a fog (BHS_GAS_REFLEN overrides, in star radii).
     static const double refRadii = std::getenv("BHS_GAS_REFLEN") ? std::atof(std::getenv("BHS_GAS_REFLEN")) : 8.0;
     fi.gasRefLen = static_cast<float>(std::max(refRadii * tde_.starRadiusM(), 1e-6));
+    gasParticles_.refLen = fi.gasRefLen;
     if (std::getenv("BHS_DEBUG_TDE") && !gasRefs_.empty()) {
         static int n = 0;
         if (++n % 30 == 0) {
@@ -505,11 +517,20 @@ void App::frame() {
     fi.blackbodyLut = diskTex_.blackbodyLut();
     fi.resetAccumulation = camera_.movedThisFrame() || settingsChanged;
     fi.diskAnimating = !settings_.paused && settings_.diskSpeed > 0.0f && settings_.diskMode != DISK_NONE;
-    // A real disruption happens around a quiet black hole and builds its own disk from the debris, so
-    // the steady disk fades out (over about two seconds) while an event plays.
-    const float fadeTarget = tde_.active() && !tdeCtl_.keepDisk ? 0.0f : 1.0f;
+    // A real disruption happens around a quiet black hole and builds its own disk from the debris: the
+    // steady disk fades out (over about two seconds) while an event plays, the debris disk fades in as the
+    // gas comes back, and after the event the steady disk returns once the debris disk has faded.
+    const bool eventDisk = tde_.active() && !tdeCtl_.keepDisk;
+    debrisFade_ += ((eventDisk ? director_.diskPresence() : 0.0f) - debrisFade_) * std::min(1.0f, dt * 1.5f);
+    const float fadeTarget = eventDisk || debrisFade_ > 0.02f ? 0.0f : 1.0f;
     diskFade_ += (fadeTarget - diskFade_) * std::min(1.0f, dt * 1.5f);
     fi.diskFade = diskFade_;
+    if (diskFade_ < 0.01f && debrisFade_ > 0.001f) {
+        fi.diskFade = debrisFade_;
+        fi.debrisDisk = true;
+        fi.debrisRing = static_cast<float>(director_.ringRadiusM());
+        fi.diskAnimating = !settings_.paused;
+    }
     fi.debugView = debugView_;
     renderer_.render(fi);
 
@@ -522,7 +543,38 @@ void App::frame() {
     }
 
     const bool lastFrame = opt_.frames > 0 && frameIndex_ + 1 >= opt_.frames;
-    const bool wantShot = requestScreenshot_ || (lastFrame && !opt_.screenshot.empty());
+    // Test hook: BHS_SHOTS="frame,frame,..." also saves screenshots at those frames, next to --screenshot
+    // (shots/a.png -> shots/a_f300.png), so one run can film a whole event.
+    std::string hookShot;
+    if (const char* shots = std::getenv("BHS_SHOTS"); shots && !opt_.screenshot.empty()) {
+        for (const char* q = shots; q && *q; q = std::strchr(q, ',') ? std::strchr(q, ',') + 1 : nullptr) {
+            if (std::atoi(q) != frameIndex_) continue;
+            const size_t dot = opt_.screenshot.rfind('.');
+            const std::string stem = dot == std::string::npos ? opt_.screenshot : opt_.screenshot.substr(0, dot);
+            hookShot = stem + "_f" + std::to_string(frameIndex_) + ".png";
+        }
+    }
+    const bool wantShot = requestScreenshot_ || (lastFrame && !opt_.screenshot.empty()) || !hookShot.empty();
+    // Test hook: BHS_DUMP_PARTICLES (with BHS_SHOTS) also writes the gas particles at those frames:
+    // int32 count, then count vec4s each of position, velocity and aux, then the parameter block.
+    if (!hookShot.empty() && std::getenv("BHS_DUMP_PARTICLES")) {
+        const tde::TdeSim::ParticleView pv = tde_.particles();
+        if (pv.count > 0) {
+            std::vector<glm::vec4> buf(static_cast<size_t>(pv.count));
+            std::vector<unsigned char> params(static_cast<size_t>(pv.paramsSize));
+            const std::string path = hookShot.substr(0, hookShot.size() - 4) + ".particles";
+            if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+                std::fwrite(&pv.count, sizeof(int), 1, f);
+                for (GLuint b : {pv.pos, pv.vel, pv.aux}) {
+                    glGetNamedBufferSubData(b, 0, static_cast<GLsizeiptr>(buf.size() * sizeof(glm::vec4)), buf.data());
+                    std::fwrite(buf.data(), sizeof(glm::vec4), buf.size(), f);
+                }
+                glGetNamedBufferSubData(pv.params, pv.paramsOffset, pv.paramsSize, params.data());
+                std::fwrite(params.data(), 1, params.size(), f);
+                std::fclose(f);
+            }
+        }
+    }
 
     // Run the ImGui frame every frame so its input queue drains and the Want* flags stay current;
     // only the drawing is skipped when the panel is hidden.
@@ -562,7 +614,9 @@ void App::frame() {
         ctx.tde = &tdeCtl_;
         ctx.tdeStats = &tde_.stats();
         ctx.tdeActive = tde_.active();
-        ctx.tdePhase = tdePhase();
+        ctx.tdeTitle = director_.title();
+        ctx.tdeCaption = director_.caption();
+        ctx.tdeFade = director_.fade();
         ctx.tdeWarp = tdeWarp_ > 0.0 ? tdeWarp_ : settings_.timeWarp;
         ctx.diskHidden = tde_.active() && !tdeCtl_.keepDisk;
         ctx.uniTargets = &universe_.targets();
@@ -583,8 +637,9 @@ void App::frame() {
 
     if (wantShot) {
         requestScreenshot_ = false;
-        const std::string path = (lastFrame && !opt_.screenshot.empty()) ? opt_.screenshot
-                                                                         : capture::timestampedPath(appRoot_ + "/screenshots", "blackhole");
+        const std::string path = !hookShot.empty()                       ? hookShot
+                                 : (lastFrame && !opt_.screenshot.empty()) ? opt_.screenshot
+                                                                           : capture::timestampedPath(appRoot_ + "/screenshots", "blackhole");
         glBindFramebuffer(GL_READ_FRAMEBUFFER, targetFbo_);
         capture::savePngFromFramebuffer(path, fbW_, fbH_);
     }
@@ -761,15 +816,6 @@ void App::saveSettings() {
     settings_.save(opt_.settingsPath);
 }
 
-int App::tdePhase() const {
-    if (!tde_.active()) return 0;
-    const tde::TdeStats& st = tde_.stats();
-    if (st.swallowedWhole) return 5;
-    if (!st.released) return 1;
-    if (st.accretedFraction > 1e-3) return 4;
-    return glm::dot(tde_.starPosition(), tde_.starVelocity()) > 0.0 ? 3 : 2;
-}
-
 void App::applyUniverseSettings() {
     const int mode = settings_.universeMode;
     if (mode == uniModeApplied_ && (mode != 1 || settings_.universeSeed == uniSeedApplied_) &&
@@ -788,7 +834,7 @@ void App::applyUniverseSettings() {
     renderer_.resetAccumulation();
 }
 
-void App::updateTde(double dtM) {
+void App::updateTde(double dtM, double dtReal) {
     if (tdeCtl_.clearRequested) {
         tdeCtl_.clearRequested = false;
         tde_.clear();
@@ -810,34 +856,20 @@ void App::updateTde(double dtM) {
         op.retrograde = tdeCtl_.retrograde;
         op.startDistanceRt = 3.0;
         tde_.spawn(sp, op, settings_.bhMassSolar, tdeCtl_.particles);
+        renderer_.resetGasParticleStats();
+        director_.start(tde_.starPosition(), tde_.starVelocity());
         tdeCtl_.watchRequested = true;
         logInfo("spawned a {} M_sun, {} R_sun star (beta {})", sp.massSolar, sp.radiusSolar, op.beta);
     }
     if (tdeCtl_.watchRequested) {
         tdeCtl_.watchRequested = false;
-        // Ride along with the star: just behind, above and outside it, looking along its path, so the
-        // black hole looms ahead as it falls in and the stretching happens right in front of the camera.
-        const glm::dvec3 p = tde_.starPosition(), v = tde_.starVelocity();
-        const double R = std::max(tde_.starRadiusM(), 1e-6);
-        const glm::dvec3 vh = glm::length(v) > 0.0 ? glm::normalize(v) : glm::dvec3(0.0, 0.0, -1.0);
-        glm::dvec3 n = glm::cross(p, v);
-        n = glm::length(n) > 0.0 ? glm::normalize(n) : glm::dvec3(0.0, 1.0, 0.0);
-        const glm::dvec3 out = glm::length(p) > 0.0 ? glm::normalize(p) : glm::dvec3(1.0, 0.0, 0.0);
-        const double k = 14.0;
         followName_.clear();
         flightTarget_.clear();
-        (void)k;
-        watchNormal_ = n;
-        watchLook_ = 0.15;
-        watchOffset_ = glm::normalize(out + n * 0.45 - vh * 0.35) * (14.0 * R);
-        camera_.setPose(p + watchOffset_, camera_.orientation());
-        camera_.lookAt(glm::mix(p, glm::dvec3(0.0), 0.15));
-        watchPhase_ = 1;
-        watchPrev_ = p;
-        watchPeriM_ = std::max(tde_.stats().pericenterM, 2.5);
+        director_.engageCamera();
     }
     if (!tde_.active()) {
         tdeWarp_ = 0.0;
+        director_.stop();
         return;
     }
     // A star swallowed whole leaves nothing to watch: end the event a few seconds after it is gone, so the
@@ -847,27 +879,31 @@ void App::updateTde(double dtM) {
         if (swallowedAt_ < 0.0) swallowedAt_ = now;
         if (now - swallowedAt_ > 4.0) {
             tde_.clear();
+            director_.stop();
             swallowedAt_ = -1.0;
             tdeWarp_ = 0.0;
             return;
         }
     }
-    if (tdeCtl_.autoWarp) {
-        // Keep the event moving at a watchable pace: about 1/15 of the local dynamical time per
-        // second while the star falls in, growing with the age of the debris afterwards.
-        const tde::TdeStats& st = tde_.stats();
-        // (At least 6 M: a star swallowed whole would otherwise crawl the last few M to the horizon.) After
-        // release the clock speeds up 35% per second until the debris falls back. This is the event's own
-        // clock: the planets, the sky and the saved settings keep the user's time warp.
-        const double r = std::max(tde_.starIntact() ? glm::length(tde_.starPosition()) : st.pericenterM, 6.0);
-        const double tdyn = std::pow(r, 1.5);
-        double perSecondM = std::max(tdyn / (st.swallowedWhole ? 6.0 : 15.0), (st.released ? 0.35 * st.timeM : 0.0));
-        // A star swallowed whole crawls the last few M: in coordinate time it all but freezes at the horizon.
-        if (st.swallowedWhole && glm::length(tde_.starPosition()) < 4.0) perSecondM = std::max(perSecondM, 40.0);
-        tdeWarp_ = std::clamp(perSecondM * units::secondsPerM(settings_.bhMassSolar), 1e-3, 1e11);
-    } else {
-        tdeWarp_ = 0.0;
-    }
+    // The director paces the event's own clock (the planets, the sky and the saved settings keep the
+    // user's time warp), frames it and decides how far the debris disk has formed.
+    const tde::TdeStats& st = tde_.stats();
+    TdeDirector::Input din;
+    din.dt = dtReal;
+    din.timeM = st.timeM;
+    din.active = true;
+    din.intact = tde_.starIntact();
+    din.released = st.released;
+    din.swallowed = st.swallowedWhole;
+    din.pericenterM = st.pericenterM;
+    din.starRadiusM = tde_.starRadiusM();
+    din.pos = tde_.starPosition();
+    din.vel = tde_.starVelocity();
+    din.accretedFraction = st.accretedFraction;
+    din.particles = tdeCtl_.particles;
+    din.gas = &renderer_.gasParticleStats();
+    director_.update(din);
+    tdeWarp_ = tdeCtl_.autoWarp ? std::clamp(director_.pace() * units::secondsPerM(settings_.bhMassSolar), 1e-3, 1e11) : 0.0;
     tde_.step(dtM);
 }
 
@@ -914,15 +950,19 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     const double dtEvent = settings_.paused ? 0.0 : (tdeWarp_ > 0.0 ? tdeWarp_ : settings_.timeWarp) * static_cast<double>(dt);
     simSeconds_ += dtSim;
     bhSystem_.update(dtSim / sPerMNow);
-    updateTde(dtEvent / sPerMNow);
+    updateTde(dtEvent / sPerMNow, dt);
     buildBodies();
 
     if (tde_.active() && std::getenv("BHS_DEBUG_TDE")) {
         static int frameNo = 0;
         if (++frameNo % 30 == 0) {
             const tde::TdeStats& st = tde_.stats();
-            logInfo("tde t={:.3g} M phase {} star r={:.3g} M intact={} released={} watch={} cam r={:.3g} M to star {:.3g} M volumes={} world warp={:.3g} event warp={:.3g}",
-                    st.timeM, tdePhase(), glm::length(tde_.starPosition()), tde_.starIntact(), st.released, watchPhase_,
+            const GasParticleStats& gs = renderer_.gasParticleStats();
+            logInfo("    director: stage {} pace {:.3g} M/s disk {:.2f} camera {} | gas: in play {} near {} box [{:.3g} {:.3g} {:.3g}]..[{:.3g} {:.3g} {:.3g}] back in {:.3g} M (at t {:.3g})",
+                    static_cast<int>(director_.stage()), director_.pace(), director_.diskPresence(), director_.cameraEngaged(),
+                    gs.inPlay, gs.nearHole, gs.lo.x, gs.lo.y, gs.lo.z, gs.hi.x, gs.hi.y, gs.hi.z, gs.returnInM, gs.timeM);
+            logInfo("tde t={:.3g} M stage {} star r={:.3g} M intact={} released={} watch={} cam r={:.3g} M to star {:.3g} M volumes={} world warp={:.3g} event warp={:.3g}",
+                    st.timeM, static_cast<int>(director_.stage()), glm::length(tde_.starPosition()), tde_.starIntact(), st.released, director_.cameraEngaged(),
                     glm::length(camera_.position()), glm::length(camera_.position() - tde_.starPosition()), tde_.volumeCount(),
                     settings_.timeWarp, tdeWarp_);
             {
@@ -965,63 +1005,25 @@ void App::updateWorld(float dt, const Camera::Input& in) {
             }
         }
     }
-    // Star disruption camera: ride with the star (after release, its densest debris) until the debris
-    // has swung past pericentre, then pull back to watch it around the hole. Any flying cancels it.
-    if (watchPhase_ != 0) {
+    // Star disruption camera: the director's viewpoint for each stage, until the user flies the camera (or
+    // starts a flight somewhere); Watch hands it back.
+    if (director_.cameraEngaged()) {
         const bool steering = glm::length(in.move) > 0.0f || glm::length(in.lookDelta) > 0.0f || in.roll != 0.0f;
-        if (!tde_.active() || steering) {
-            watchPhase_ = 0;
-        } else if (watchPhase_ == 1) {
-            // Placed and aimed explicitly every frame: shifting by the star's displacement drifts as the
-            // camera's own motion smoothing works against it.
-            // After release, aim at the centre of the finest gas volume (it tracks the debris and, unlike the
-            // densest-debris position read back two frames late, is current).
-            glm::dvec3 p = tde_.starPosition();
-            double extent = tde_.starRadiusM();
-            if (!tde_.starIntact()) {
-                float finest = 1e30f;
-                for (int i = 0; i < tde_.volumeCount(); ++i)
-                    if (tde_.volume(i).halfSize > 0.0f && tde_.volume(i).halfSize < finest) {
-                        finest = tde_.volume(i).halfSize;
-                        p = glm::dvec3(tde_.volume(i).center);
-                    }
-                if (finest < 1e29f) extent = std::max(extent, static_cast<double>(finest));
-            }
-            // On the far side of the star from the hole, a little above its orbit and behind it: the star
-            // (then its stretching debris) in front, the black hole looming behind. The offset follows
-            // the star's position smoothly, so the camera sweeps round it at pericentre, and backs off
-            // as the debris grows.
-            const glm::dvec3 out = glm::length(p) > 0.0 ? glm::normalize(p) : glm::dvec3(1.0, 0.0, 0.0);
-            const glm::dvec3 vel = tde_.starVelocity();
-            const glm::dvec3 vh = glm::length(vel) > 0.0 ? glm::normalize(vel) : glm::dvec3(0.0);
-            // Once the debris has stretched over several star radii, swing up above the orbit and back off
-            // to frame the stream side-on together with the hole; until then stay close to the star.
-            const bool torn = !tde_.starIntact() && extent > 4.0 * tde_.starRadiusM();
-            const double dist = torn ? std::max(4.0 * extent, 1.1 * glm::length(p)) : std::max(14.0 * tde_.starRadiusM(), 4.0 * extent);
-            const glm::dvec3 dirWant = torn ? glm::normalize(watchNormal_ * 0.85 + out * 0.45 - vh * 0.25)
-                                            : glm::normalize(out + watchNormal_ * 0.45 - vh * 0.35);
-            watchOffset_ = glm::mix(watchOffset_, dirWant * dist, 1.0 - std::exp(-static_cast<double>(dt) / 0.6));
-            watchLook_ = glm::mix(watchLook_, torn ? 0.4 : 0.15, 1.0 - std::exp(-static_cast<double>(dt) / 0.6));
-            camera_.setPose(p + watchOffset_, camera_.orientation());
-            camera_.lookAt(glm::mix(p, glm::dvec3(0.0), watchLook_));
-            watchPrev_ = p;
-            const tde::TdeStats& st = tde_.stats();
-            const double r = glm::length(p);
-            const bool leaving = glm::dot(p, tde_.starVelocity()) > 0.0;
-            if ((st.released && leaving && r > 1.6 * watchPeriM_) || (st.swallowedWhole && r < 4.0)) {
-                const double D = std::max(30.0, 3.0 * watchPeriM_);
-                const glm::dvec3 from = glm::length(camera_.position()) > 0.0 ? glm::normalize(camera_.position()) : glm::dvec3(0, 0, 1);
-                camera_.flyToTarget(glm::dvec3(0.0), D, from);
-                watchPhase_ = 2;
-            }
-        } else if (watchPhase_ == 2 && !camera_.isTransitioning()) {
-            // Hold a view of the black hole where the action is: the stream leaving and, later, the bound
-            // debris falling back and wrapping the hole (never chase the escaping half out into the dark).
-            const double target = std::max(30.0, 5.5 * watchPeriM_);
-            const double d = glm::length(camera_.position());
-            if (d > 0.0) {
-                const double f = std::pow(target / d, std::min(1.0, 1.2 * static_cast<double>(dt)));
-                camera_.setPose(camera_.position() * f, camera_.orientation());
+        if (steering || camera_.isTransitioning()) {
+            director_.releaseCamera();
+        } else {
+            glm::dvec3 pos, target;
+            director_.view(pos, target);
+            camera_.setPose(pos, camera_.orientation());
+            camera_.lookAt(target);
+            if (std::getenv("BHS_DEBUG_CAM")) {   // test hook: where the director's camera really ends up
+                const glm::dvec3 star = tde_.starPosition();
+                const glm::dvec3 rel = star - camera_.position();
+                const glm::dvec3 fwd = -glm::dvec3(camera_.basis()[2]);
+                logInfo("cam f{} want {:.3f} {:.3f} {:.3f} got {:.3f} {:.3f} {:.3f} target {:.2f} {:.2f} {:.2f} star {:.3f} {:.3f} {:.3f} dist {:.3f} angle {:.1f} deg",
+                        frameIndex_, pos.x, pos.y, pos.z, camera_.position().x, camera_.position().y, camera_.position().z,
+                        target.x, target.y, target.z, star.x, star.y, star.z, glm::length(rel),
+                        glm::degrees(std::acos(std::clamp(glm::dot(glm::normalize(rel), fwd), -1.0, 1.0))));
             }
         }
     }

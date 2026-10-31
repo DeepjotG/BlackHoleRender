@@ -46,7 +46,9 @@ struct UiContext {
     TdeControls* tde = nullptr;
     const tde::TdeStats* tdeStats = nullptr;
     bool tdeActive = false;
-    int tdePhase = 0;               // 0 none, 1 falling in, 2 torn apart, 3 stream, 4 falling back, 5 swallowed whole
+    const char* tdeTitle = nullptr;     // the star disruption's current stage (TdeDirector)
+    const char* tdeCaption = nullptr;   // ... and what is happening in it
+    float tdeFade = 0.0f;               // 0..1: black between two of the director's shots
     double tdeWarp = 0.0;           // the star disruption's own clock (simulated s per real s)
     bool diskHidden = false;        // the steady disk is faded out while a star disruption plays
     const std::vector<UniverseTarget>* uniTargets = nullptr;
