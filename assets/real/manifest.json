@@ -1,0 +1,237 @@
+{
+ "calibration": {
+  "calib_log_a26_over_d25": 0.0371,
+  "calib_log_d25_over_2rext": -0.0589,
+  "typical_MK_for_photometric_distances": -24.543
+ },
+ "clusters": {
+  "Antlia": {
+   "distance_mpc": 35.58,
+   "members": 42
+  },
+  "Centaurus": {
+   "distance_mpc": 47.16,
+   "members": 89
+  },
+  "Coma": {
+   "distance_mpc": 102.2,
+   "members": 117
+  },
+  "Fornax": {
+   "distance_mpc": 20.0,
+   "members": 35
+  },
+  "Hydra": {
+   "distance_mpc": 54.1,
+   "members": 76
+  },
+  "Leo (A1367)": {
+   "distance_mpc": 96.95,
+   "members": 58
+  },
+  "Norma": {
+   "distance_mpc": 70.5,
+   "members": 108
+  },
+  "Perseus": {
+   "distance_mpc": 74.1,
+   "members": 131
+  },
+  "Virgo": {
+   "distance_mpc": 16.5,
+   "members": 205
+  }
+ },
+ "format_version": 1,
+ "galaxies": {
+  "H0": 70.0,
+  "by_distance_method": {
+   "cluster_member": 861,
+   "hubble_flow": 42511,
+   "literature": 3,
+   "photometric_estimate": 1066,
+   "redshift_independent": 866
+  },
+  "by_morphology": {
+   "barred_spiral": 8317,
+   "elliptical": 8346,
+   "irregular": 1837,
+   "lenticular": 10781,
+   "spiral": 16026
+  },
+  "companions_moved": [
+   "CVnHI -> NGC 4288 (-1.55 Mpc)",
+   "ClumpIII -> [CKT2009]d0959+68 (+0.00 Mpc)",
+   "DDO169NW -> DDO 169 (-0.20 Mpc)",
+   "GARLAND -> NGC 3077 (+0.00 Mpc)",
+   "HIZSS 3B -> HIZSS003 (+0.00 Mpc)",
+   "IC 1727 -> NGC 672 (+0.00 Mpc)",
+   "KDG065 -> NGC 3115 (+0.00 Mpc)",
+   "KK 251 -> UGC 11583 (+0.00 Mpc)",
+   "KK 78 -> DDO 64 (+0.00 Mpc)",
+   "KKH 40 -> CGCG 262-028 (-0.12 Mpc)",
+   "LV J0616-5745 -> ESO 121-20 (-0.06 Mpc)",
+   "LV J1052+3628 -> NGC 3432 (+0.00 Mpc)",
+   "LV J1052+3639 -> NGC 3432 (+0.00 Mpc)",
+   "LV J1205+2813 -> KUG 1202+286 (+0.05 Mpc)",
+   "LeG21 -> KK 94 (+0.00 Mpc)",
+   "MB3 -> Dw1 (+0.20 Mpc)",
+   "NGC 4485 -> NGC 4490 (+0.00 Mpc)",
+   "NGC 4625 -> NGC 4618 (+0.00 Mpc)",
+   "NGC 4627 -> NGC 4631 (-0.07 Mpc)",
+   "NGC 5195 -> NGC 5194 (-0.74 Mpc)",
+   "UGC 1171 -> DDO 13 (-1.66 Mpc)",
+   "UGC 5086 -> NGC 2903 (+0.04 Mpc)"
+  ],
+  "count": 45307,
+  "m31_subgroup_rescaled": {
+   "factor": 0.97137,
+   "members": 32
+  },
+  "names": 14194,
+  "omega_m": 0.3,
+  "pa_measured": 44772,
+  "positions_corrected": [
+   "NGC 5194 2.3'"
+  ],
+  "type_guessed": 18987,
+  "ungc_sizes_correction_limited": 7,
+  "ungc_sizes_extinction_corrected_over_1.3x": 54
+ },
+ "generator": "tools/fetch_real_catalogs.py",
+ "inputs": {
+  "hyg": {
+   "file": "hyg_v44.csv.gz",
+   "sha256": "00b349893b9a53106dd488d8371e8d2fa586043e500bb3cdb8bff3931682197d",
+   "title": "HYG Database v4.4 (astronexus, Codeberg)",
+   "urls": [
+    "https://codeberg.org/astronexus/hyg/media/branch/main/data/hyg/CURRENT/hyg_v44.csv.gz"
+   ]
+  },
+  "mcc1": {
+   "file": "mcconnachie_table1.dat",
+   "sha256": "26242954e8befa9159a0757cbbcbf0d40f14ffd188ef58fcf1ada0930d17fe39",
+   "title": "McConnachie 2012 table 1 (VizieR J/AJ/144/4)",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/AJ/144/4/table1.dat",
+    "http://cdsarc.u-strasbg.fr/ftp/J/AJ/144/4/table1.dat"
+   ]
+  },
+  "mcc2": {
+   "file": "mcconnachie_table2.dat",
+   "sha256": "e4e7c8f76cdeff13b19168014977868c0dd25762f3e9461c72a7472f7cde3bc1",
+   "title": "McConnachie 2012 table 2",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/AJ/144/4/table2.dat",
+    "http://cdsarc.u-strasbg.fr/ftp/J/AJ/144/4/table2.dat"
+   ]
+  },
+  "mcc3": {
+   "file": "mcconnachie_table3.dat",
+   "sha256": "c21658fc9632bfbf3baf84140af093249cb366274378963804d5f47221fa3ca4",
+   "title": "McConnachie 2012 table 3",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/AJ/144/4/table3.dat",
+    "http://cdsarc.u-strasbg.fr/ftp/J/AJ/144/4/table3.dat"
+   ]
+  },
+  "mcc4": {
+   "file": "mcconnachie_table4.dat",
+   "sha256": "5bc9646ca622f8679fbda4b888c14fde51e242f550243cb90b347ce2fdbc6206",
+   "title": "McConnachie 2012 table 4",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/AJ/144/4/table4.dat",
+    "http://cdsarc.u-strasbg.fr/ftp/J/AJ/144/4/table4.dat"
+   ]
+  },
+  "rc3": {
+   "file": "rc3.tsv",
+   "sha256": "86330851f7715c8229505cb1cb73ed2ba534946f6291ef9c8ad9b8a04ea1b035",
+   "title": "Third Reference Catalogue of Bright Galaxies (de Vaucouleurs+ 1991, VizieR VII/155)",
+   "urls": [
+    "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=VII/155/rc3&-out=RA2000,DE2000,name,altname,desig,PGC,type,T,D25,R25,PA,BT,B-VT,BoT,cz&-out.max=unlimited",
+    "https://vizier.cfa.harvard.edu/viz-bin/asu-tsv?-source=VII/155/rc3&-out=RA2000,DE2000,name,altname,desig,PGC,type,T,D25,R25,PA,BT,B-VT,BoT,cz&-out.max=unlimited"
+   ]
+  },
+  "twomrs": {
+   "file": "2mrs_table3.dat.gz",
+   "sha256": "14a40e14dea131afbc2ff525e42b39fdc4094cf9d06d9a43952257eff80f1790",
+   "title": "2MASS Redshift Survey catalogue (Huchra+ 2012, VizieR J/ApJS/199/26)",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/ApJS/199/26/table3.dat.gz",
+    "http://cdsarc.u-strasbg.fr/ftp/J/ApJS/199/26/table3.dat.gz"
+   ]
+  },
+  "ungc1": {
+   "file": "ungc_table1.dat",
+   "sha256": "0d98691e4b04189e0359be7e55e8e9fa6c6d75fe085d833aad4ef5d1e101ce17",
+   "title": "UNGC table 1 (Karachentsev+ 2013, VizieR J/AJ/145/101)",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/AJ/145/101/table1.dat",
+    "http://cdsarc.u-strasbg.fr/ftp/J/AJ/145/101/table1.dat"
+   ]
+  },
+  "ungc2": {
+   "file": "ungc_table2.dat",
+   "sha256": "5fb2fb2c5aac2fa7bb1e47d8861a57b7d873523f4e0c34b76657084d9bb9cde5",
+   "title": "UNGC table 2",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/AJ/145/101/table2.dat",
+    "http://cdsarc.u-strasbg.fr/ftp/J/AJ/145/101/table2.dat"
+   ]
+  },
+  "ungc6": {
+   "file": "ungc_table6.dat",
+   "sha256": "199187c501d9570bd27b8d7ca5c9a923e16f7d0d1a6ba13659e4af2c7db5fa1b",
+   "title": "UNGC table 6 (distance moduli)",
+   "urls": [
+    "https://cdsarc.cds.unistra.fr/ftp/J/AJ/145/101/table6.dat",
+    "http://cdsarc.u-strasbg.fr/ftp/J/AJ/145/101/table6.dat"
+   ]
+  },
+  "xsc": {
+   "file": "2mass_xsc_k13.tsv",
+   "sha256": "d864f47107b060ec5756c9858ae23e9b734f36b1c41c3a99cf2f15a760647a0d",
+   "title": "2MASS Extended Source Catalog shapes, K20e < 13 (VizieR VII/233)",
+   "urls": [
+    "https://vizier.cds.unistra.fr/viz-bin/asu-tsv?-source=VII/233/xsc&-out=2MASX,RAJ2000,DEJ2000,K.K20e,Sb/a,Spa,r.ext&-out.max=unlimited&K.K20e=%3C13.0",
+    "https://vizier.cfa.harvard.edu/viz-bin/asu-tsv?-source=VII/233/xsc&-out=2MASX,RAJ2000,DEJ2000,K.K20e,Sb/a,Spa,r.ext&-out.max=unlimited&K.K20e=%3C13.0"
+   ]
+  }
+ },
+ "matching": {
+  "2mrs_merged_with_local": 161,
+  "duplicate_names_resolved": 14,
+  "hubble_velocity_below_300": 7,
+  "rc3_matches": 13723,
+  "ungc_merged_with_mcconnachie": 99
+ },
+ "outputs": {
+  "galaxies.bin": {
+   "bytes": 2893302,
+   "sha256": "28c8d4c35558b64d018e08f749c6f7acef541fa3ff6fb7349e2a63904dc7a952"
+  },
+  "stars.bin": {
+   "bytes": 4361693,
+   "sha256": "a1cbf055908928f9a6bc9ab1d7e6fb0daef67593e211d9857d4db635545ec849"
+  }
+ },
+ "stars": {
+  "catalog_limit_app_mag": 7.5,
+  "catalog_radius_pc": 1500.0,
+  "catalog_radius_rule": "99th percentile of the distances of stars with V <= limit, rounded up to 100 pc",
+  "count": 119613,
+  "distance_estimate_range_pc": [
+   400.0,
+   6000.0
+  ],
+  "distance_estimate_soft_limited": 1285,
+  "distance_estimated": 10218,
+  "hyg_version": "v4.4",
+  "literature_overrides": 8,
+  "names": 3691,
+  "skipped_nonstellar": 1,
+  "teff_from_spectral_type": 1890,
+  "teff_hot_star_correction": 10163
+ }
+}

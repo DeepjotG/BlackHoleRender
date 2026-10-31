@@ -1,0 +1,49 @@
+#version 460 core
+// Star disruption: block bookkeeping of the grids (see tde_common.glsl).
+//  uMode 0, before a deposit (one workgroup per block of every grid, gl_WorkGroupID.x = grid * BLOCKS
+//           + block): zero the accumulators of every block of the previous dilated set and reset the
+//           flags. All other accumulators are already zero.
+//  uMode 1, after deposit and restriction (one thread per block): mark the blocks within one block of
+//           a block that was written.
+#include "tde_common.glsl"
+
+layout(local_size_x = 256) in;
+
+uniform int uMode;
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    if (uMode == 0) {
+        int gb = int(gl_WorkGroupID.x);
+        int g = gb / BLOCKS;
+        int b = gb % BLOCKS;
+        ivec3 bc = ivec3(b % NBLK, (b / NBLK) % NBLK, b / (NBLK * NBLK));
+        uint flags = gBlk[gb];
+        if ((flags & 3u) != 0u) {
+            for (int j = int(lid); j < BLK * BLK * BLK; j += 256) {
+                int cell = cellIndex(bc * BLK + ivec3(j % BLK, (j / BLK) % BLK, j / (BLK * BLK)));
+                for (int w = 0; w < NWORDS; ++w) gAcc[accIndex(g, w, cell)] = 0u;
+            }
+        }
+        barrier();
+        if (lid == 0u) gBlk[gb] = 0u;
+        return;
+    }
+    int gb = int(gl_GlobalInvocationID.x);
+    if (gb >= NGRID * BLOCKS) return;
+    int g = gb / BLOCKS;
+    int b = gb % BLOCKS;
+    ivec3 bc = ivec3(b % NBLK, (b / NBLK) % NBLK, b / (NBLK * NBLK));
+    bool hit = false;
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec3 n = bc + ivec3(dx, dy, dz);
+                if (any(lessThan(n, ivec3(0))) || any(greaterThanEqual(n, ivec3(NBLK)))) continue;
+                if ((gBlk[g * BLOCKS + (n.z * NBLK + n.y) * NBLK + n.x] & 1u) != 0u) hit = true;
+            }
+    if (hit) {
+        atomicOr(gBlk[gb], 2u);
+        if (uStep.w > 0.5) atomicAdd(sWords[S_LIVE], 1u);
+    }
+}

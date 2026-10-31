@@ -5,6 +5,9 @@
 namespace bhs {
 
 enum DiskMode : int { DISK_NONE = 0, DISK_THIN = 1, DISK_VOLUMETRIC = 2 };
+// Disk flow: M of orbital motion per second at rotation speed 1 (the inner edge, period 2 pi 6^1.5 M,
+// goes round in about 6 s).
+inline constexpr double kDiskFlowRate = 16.0;
 enum TonemapMode : int { TONEMAP_AGX = 0, TONEMAP_ACES = 1, TONEMAP_REINHARD = 2, TONEMAP_NONE = 3 };
 enum Preset : int { PRESET_LOW = 0, PRESET_MEDIUM = 1, PRESET_HIGH = 2, PRESET_ULTRA = 3, PRESET_CUSTOM = 4 };
 
@@ -63,6 +66,18 @@ struct Settings {
     float saturation = 1.15f;
     float sharpen = 0.3f;
 
+    // ---- Universe and physical scale ----
+    int universeMode = 0;           // 0 = painted backdrop, 1 = invented 3D universe, 2 = real 3D universe
+    uint32_t universeSeed = 2024u;  // invented universe
+    int realPlacement = 0;          // real universe: 0 = Sagittarius A* (galactic centre), 1 = near the Sun
+    double bhMassSolar = 1.0e8;     // black hole mass (Gargantua: 100 million suns)
+    double timeWarp = 1.0;          // simulated seconds per real second
+    bool planetsEnabled = true;     // planets orbiting the black hole
+    bool showLabels = true;         // on-screen markers for planets and other targets
+    float gasBrightness = 4.0f;     // star-disruption gas: exposure (blackbody luminance relative to 6500 K)
+    float gasOpacity = 0.5f;        // star-disruption gas: absorption scale (translucent streams)
+    float deepSky = 12.0f;          // 3D universe: long-exposure boost for distant galaxies (1 = true brightness)
+
     // ---- Camera ----
     float fovDeg = 60.0f;
     float mouseSensitivity = 0.12f;
@@ -77,6 +92,9 @@ struct Settings {
     static const char* presetName(int p);
     bool save(const std::string& path) const;
     bool load(const std::string& path);
+    // Every field still at the value `launched` gave it goes back to `loaded`: a launch flag sets a
+    // value for that launch only, and it is saved only where the user changed it since (App::run).
+    void revertUntouched(const Settings& loaded, const Settings& launched);
     std::string fingerprint() const;       // changes whenever any saved field changes
     std::string traceFingerprint() const;  // only fields that change the traced HDR image
 };

@@ -1,5 +1,10 @@
 #pragma once
+#include "GrbControls.h"
+#include "grb/GrbModel.h"
+#include "SnControls.h"
+#include "sn/SnModel.h"
 #include <string>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -7,7 +12,12 @@ namespace bhs {
 
 class Camera;
 class Renderer;
+class BlackHoleSystem;
+struct BodyDesc;
 struct Settings;
+struct TdeControls;
+struct UniverseTarget;
+namespace tde { struct TdeStats; }
 
 struct UiContext {
     Settings* settings = nullptr;
@@ -17,6 +27,8 @@ struct UiContext {
     bool isNvidia = false;
     bool nvidiaDriverLoaded = false;
     bool bridged = false;
+    bool igpuForced = false;
+    float bridgeCopyMs = 0.0f;
     float fps = 0.0f;
     double skyBakeMs = 0.0;
     int* debugView = nullptr;
@@ -27,6 +39,50 @@ struct UiContext {
     bool* requestSave = nullptr;
     bool mouseCaptured = false;
     bool skyDirty = false;
+    BlackHoleSystem* bhSystem = nullptr;
+    const std::vector<BodyDesc>* bodies = nullptr;
+    double simSeconds = 0.0;
+    std::string* followName = nullptr;    // body the camera rides along with
+    std::string* followLeft = nullptr;    // Stop writes the planet here so the auto-ride does not hop straight back on
+    std::string* goToRequest = nullptr;   // set to a target name to start a flight
+    std::string* rideRequest = nullptr;   // set to a planet name to ride along with it
+    const char* nearestName = "";
+    double nearestDist = 0.0;             // M, to the nearest surface
+    bool* turbo = nullptr;                // 1000x flight speed
+    double* userMass = nullptr;           // App::userMass_: the black hole to give back after an event or the
+                                          // Real universe (0: none); a mass picked by hand is the user's own,
+                                          // so the panel zeroes it
+    TdeControls* tde = nullptr;
+    const tde::TdeStats* tdeStats = nullptr;
+    bool tdeActive = false;
+    const char* tdeTitle = nullptr;     // the star disruption's current stage (TdeDirector)
+    const char* tdeCaption = nullptr;   // ... and what is happening in it
+    float tdeFade = 0.0f;               // 0..1: black between two of the director's shots
+    double tdeWarp = 0.0;           // the star disruption's own clock (simulated s per real s)
+    GrbControls* grb = nullptr;     // the neutron-star merger
+    bool grbActive = false;
+    const grb::State* grbState = nullptr;
+    const grb::Model* grbModel = nullptr;
+    double grbWarp = 0.0;
+    SnControls* sn = nullptr;       // the supernova
+    bool snActive = false;
+    const sn::State* snState = nullptr;
+    const sn::Model* snModel = nullptr;
+    double snWarp = 0.0;
+    const char* eventTitle = nullptr;   // the caption overlay: whichever event plays
+    const char* eventCaption = nullptr;
+    float eventFade = 0.0f;
+    bool diskHidden = false;        // the steady disk is faded out while a star disruption plays
+    const std::vector<UniverseTarget>* uniTargets = nullptr;
+    const char* universeStatus = "";
+    const char* universeError = "";
+    bool galaxiesMissing = false;   // real universe without its galaxy catalogue
+    bool universeActive = false;    // a 3D universe draws the sky, so the painted backdrop's controls are idle
+    int fetchState = 0;             // CatalogFetch::State
+    const char* fetchLine = "";
+    bool* fetchRequest = nullptr;
+    size_t uniStars = 0;
+    double simJulianDate = 0.0;
 };
 
 class Ui {
@@ -40,10 +96,16 @@ public:
     bool wantsKeyboard() const;
     bool wantsMouse() const;
     bool anyItemActive() const;
+    bool popupOpen() const;                               // a dropdown (any ImGui popup) is open
+    void requestClosePopups() { closePopups_ = true; }    // ... and Esc asked to close it (done at the next frame)
 
 private:
+    void drawMarkers(UiContext& ctx);
     bool inited_ = false;
+    bool closePopups_ = false;      // close the open popups at the next newFrame
     bool showHelp_ = true;
+    char searchBuf_[96] = {0};
+    int lastDiskMode_ = 2;          // disk mode to restore when the disk is switched back on
 };
 
 }  // namespace bhs

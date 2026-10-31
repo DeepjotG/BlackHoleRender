@@ -1,0 +1,113 @@
+#version 460 core
+// Stars of the 3D universe as seen from the camera: project each star, cull by apparent
+// magnitude, and bucket the survivors by cube-face tile so the ray tracer can look up the stars
+// near any (lensed) direction. Three passes selected by BHS_PASS: 0 count, 1 scan, 2 scatter.
+#include "universe_common.glsl"
+
+#ifndef BHS_PASS
+#define BHS_PASS 0
+#endif
+
+struct StarIn {
+    vec4 posMag;        // xyz: parsecs relative to the upload origin (galactic axes), w: absolute V mag
+    vec4 colorRadius;   // rgb: linear colour normalised to luminance 1, w: radius (solar radii)
+};
+struct StarOut {
+    vec4 dirFlux;       // xyz: unit direction (renderer frame), w: flux relative to a 0 mag star
+    vec4 color;
+};
+layout(std430, binding = 0) readonly buffer StarsIn { StarIn starsIn[]; };
+layout(std430, binding = 1) buffer Counts { uint counts[]; };
+layout(std430, binding = 2) buffer Offsets { uint offsets[]; };     // exclusive scan; offsets[N] = total
+layout(std430, binding = 3) writeonly buffer StarsOut { StarOut starsOut[]; };
+
+uniform int uCount;
+uniform vec3 uCamPc;           // camera, parsecs relative to the upload origin
+uniform mat3 uR;               // galactic -> renderer rotation
+uniform float uLimMag;         // faintest apparent magnitude kept
+uniform int uT;                // tiles per face edge
+uniform samplerCube uDust;     // diffuse sky from the viewpoint; alpha = V optical depth to infinity
+uniform samplerCube uTauA;     // optical depth to 30, 100, 300, 1000 pc
+uniform samplerCube uTauB;     // optical depth to 3, 10 kpc
+uniform int uHaveDust;
+
+bool projectStar(uint i, out int tile, out vec3 dir, out float flux, out vec3 col) {
+    tile = 0;
+    dir = vec3(0.0, 0.0, 1.0);
+    flux = 0.0;
+    col = vec3(0.0);
+    vec4 pm = starsIn[i].posMag;
+    vec3 rel = pm.xyz - uCamPc;
+    float d = length(rel);
+    if (!(d > 1e-9)) return false;
+    float m = pm.w + 5.0 * (log2(d) * 0.30102999 - 1.0);   // distance modulus, d in pc
+    dir = normalize(uR * (rel / d));
+    if (uHaveDust != 0) {
+        // Dust between us and the star: the optical depth recorded by the sky bake at fixed distances
+        // (none within 10 pc, then 30 pc ... 10 kpc, infinity at 30 kpc), interpolated in log distance.
+        vec4 a = textureLod(uTauA, dir, 0.0), b = textureLod(uTauB, dir, 0.0);
+        float node[8] = float[](0.0, a.x, a.y, a.z, a.w, b.x, b.y, textureLod(uDust, dir, 0.0).a);
+        const float lgNode[8] = float[](1.0, 1.4771213, 2.0, 2.4771213, 3.0, 3.4771213, 4.0, 4.4771213);
+        float lg = log2(max(d, 1.0)) * 0.30102999;
+        float tau = lg >= lgNode[7] ? node[7] : 0.0;
+        for (int k = 0; k < 7; ++k)
+            if (lg >= lgNode[k] && lg < lgNode[k + 1]) tau = mix(node[k], node[k + 1], (lg - lgNode[k]) / (lgNode[k + 1] - lgNode[k]));
+        m += 1.086 * tau;
+    }
+    if (!(m <= uLimMag)) return false;
+    flux = exp2(-1.32877124 * m);                          // 10^(-0.4 m)
+    col = starsIn[i].colorRadius.rgb;
+    tile = cubeTile(dir, uT);
+    return true;
+}
+
+#if BHS_PASS == 0
+layout(local_size_x = 256) in;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(uCount)) return;
+    int tile;
+    vec3 dir, col;
+    float flux;
+    if (projectStar(i, tile, dir, flux, col)) atomicAdd(counts[tile], 1u);
+}
+#elif BHS_PASS == 1
+layout(local_size_x = 1024) in;
+shared uint sums[1024];
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint N = uint(6 * uT * uT);
+    uint per = (N + 1023u) / 1024u;
+    uint begin = min(tid * per, N), end = min(begin + per, N);
+    uint s = 0u;
+    for (uint k = begin; k < end; ++k) s += counts[k];
+    sums[tid] = s;
+    barrier();
+    for (uint off = 1u; off < 1024u; off <<= 1u) {   // Hillis-Steele inclusive scan
+        uint v = tid >= off ? sums[tid - off] : 0u;
+        barrier();
+        sums[tid] += v;
+        barrier();
+    }
+    uint run = tid > 0u ? sums[tid - 1u] : 0u;
+    for (uint k = begin; k < end; ++k) {
+        uint c = counts[k];
+        offsets[k] = run;
+        run += c;
+        counts[k] = 0u;                                // reused as write cursors by the scatter pass
+    }
+    if (tid == 1023u) offsets[N] = sums[1023];
+}
+#else
+layout(local_size_x = 256) in;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(uCount)) return;
+    int tile;
+    vec3 dir, col;
+    float flux;
+    if (!projectStar(i, tile, dir, flux, col)) return;
+    uint slot = atomicAdd(counts[tile], 1u);
+    starsOut[offsets[tile] + slot] = StarOut(vec4(dir, flux), vec4(col, 0.0));
+}
+#endif

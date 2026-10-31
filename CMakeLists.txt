@@ -80,17 +80,52 @@ find_package(Threads REQUIRED)
 # ---------------------------------------------------------------- core library (shared by app and tests)
 add_library(bhs_core STATIC
   src/Settings.cpp
-  src/Camera.cpp)
+  src/Camera.cpp
+  src/Units.cpp
+  src/BlackHoleSystem.cpp
+  src/Bodies.cpp)
 target_include_directories(bhs_core PUBLIC src)
 target_link_libraries(bhs_core PUBLIC glm::glm)
 target_compile_definitions(bhs_core PUBLIC GLM_ENABLE_EXPERIMENTAL GLM_FORCE_SILENT_WARNINGS)
 
 # ---------------------------------------------------------------- application
+# Star-disruption simulation: the real module when present, otherwise a placeholder.
+# Modules listed here are built from their placeholders even if the real sources exist
+# (useful while a module is being written), e.g. -DBHS_FORCE_STUBS="RealUniverse;TdeSim".
+set(BHS_FORCE_STUBS "" CACHE STRING "Modules to build from src/stubs placeholders")
+file(GLOB BHS_TDE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/tde/*.cpp)
+if(NOT BHS_TDE_SOURCES OR "TdeSim" IN_LIST BHS_FORCE_STUBS)
+  set(BHS_TDE_SOURCES ${CMAKE_SOURCE_DIR}/src/stubs/TdeSimStub.cpp)
+endif()
+
+# 3D universe modules: the real implementations when present, placeholders otherwise.
+set(BHS_UNIVERSE_SOURCES)
+set(BHS_GALAXY_MODEL_STUB 0)
+foreach(mod GalaxyModel StarField InventedUniverse RealUniverse)
+  if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/${mod}.cpp AND NOT mod IN_LIST BHS_FORCE_STUBS)
+    list(APPEND BHS_UNIVERSE_SOURCES ${CMAKE_SOURCE_DIR}/src/universe/${mod}.cpp)
+  else()
+    list(APPEND BHS_UNIVERSE_SOURCES ${CMAKE_SOURCE_DIR}/src/stubs/${mod}Stub.cpp)
+    if(mod STREQUAL "GalaxyModel")
+      set(BHS_GALAXY_MODEL_STUB 1)   # the sky bake must then use the matching fallback shader
+    endif()
+  endif()
+endforeach()
+
 add_executable(blackhole
+  ${BHS_TDE_SOURCES}
+  ${BHS_UNIVERSE_SOURCES}
+  src/UniverseScene.cpp
   src/main.cpp
   src/App.cpp
   src/Shader.cpp
   src/Renderer.cpp
+  src/GasParticles.cpp
+  src/TdeDirector.cpp
+  src/grb/GrbEvent.cpp
+  src/grb/GrbDirector.cpp
+  src/sn/SnEvent.cpp
+  src/sn/SnDirector.cpp
   src/SkyBaker.cpp
   src/DiskTextures.cpp
   src/Ui.cpp
@@ -102,6 +137,7 @@ target_include_directories(blackhole PRIVATE ${BHS_EGL_INCLUDE_DIR})
 target_compile_definitions(blackhole PRIVATE
   BHS_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders"
   BHS_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_compile_definitions(blackhole PRIVATE BHS_GALAXY_MODEL_STUB=${BHS_GALAXY_MODEL_STUB})
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(blackhole PRIVATE -Wall -Wextra -Wno-unused-parameter)
   target_compile_options(bhs_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -115,3 +151,45 @@ add_test(NAME geodesic_tests COMMAND geodesic_tests)
 add_executable(settings_tests tests/settings_tests.cpp)
 target_link_libraries(settings_tests PRIVATE bhs_core)
 add_test(NAME settings_tests COMMAND settings_tests)
+add_executable(bhsystem_tests tests/bhsystem_tests.cpp)
+target_link_libraries(bhsystem_tests PRIVATE bhs_core)
+add_test(NAME bhsystem_tests COMMAND bhsystem_tests)
+add_executable(orbits_tests tests/orbits_tests.cpp)
+target_link_libraries(orbits_tests PRIVATE bhs_core)
+add_test(NAME orbits_tests COMMAND orbits_tests)
+# 3D universe modules (tested from their real sources whenever they exist).
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/GalaxyModel.cpp)
+  add_executable(galaxy_model_tests tests/galaxy_model_tests.cpp src/universe/GalaxyModel.cpp)
+  target_link_libraries(galaxy_model_tests PRIVATE bhs_core)
+  add_test(NAME galaxy_model_tests COMMAND galaxy_model_tests)
+  if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/InventedUniverse.cpp)
+    add_executable(invented_universe_tests tests/invented_universe_tests.cpp src/universe/InventedUniverse.cpp src/universe/GalaxyModel.cpp)
+    target_link_libraries(invented_universe_tests PRIVATE bhs_core)
+    add_test(NAME invented_universe_tests COMMAND invented_universe_tests)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/StarField.cpp)
+      add_executable(starfield_tests tests/starfield_tests.cpp src/universe/StarField.cpp src/universe/InventedUniverse.cpp
+                     src/universe/GalaxyModel.cpp)
+      target_link_libraries(starfield_tests PRIVATE bhs_core)
+      add_test(NAME starfield_tests COMMAND starfield_tests)
+    endif()
+  endif()
+endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/universe/RealUniverse.cpp AND EXISTS ${CMAKE_SOURCE_DIR}/src/universe/GalaxyModel.cpp)
+  add_executable(real_universe_tests tests/real_universe_tests.cpp src/universe/RealUniverse.cpp src/universe/GalaxyModel.cpp)
+  target_link_libraries(real_universe_tests PRIVATE bhs_core Threads::Threads)
+  add_test(NAME real_universe_tests COMMAND real_universe_tests ${CMAKE_SOURCE_DIR}/assets)
+endif()
+if(EXISTS ${CMAKE_SOURCE_DIR}/tests/tde_tests.cpp)
+  add_executable(tde_tests tests/tde_tests.cpp)
+  target_link_libraries(tde_tests PRIVATE bhs_core)
+  add_test(NAME tde_tests COMMAND tde_tests)
+endif()
+add_executable(tde_director_tests tests/tde_director_tests.cpp src/TdeDirector.cpp)
+target_link_libraries(tde_director_tests PRIVATE bhs_core glad_gl_core_46)
+add_test(NAME tde_director_tests COMMAND tde_director_tests)
+add_executable(grb_tests tests/grb_tests.cpp)
+target_link_libraries(grb_tests PRIVATE bhs_core)
+add_test(NAME grb_tests COMMAND grb_tests)
+add_executable(sn_tests tests/sn_tests.cpp src/sn/SnDirector.cpp)
+target_link_libraries(sn_tests PRIVATE bhs_core)
+add_test(NAME sn_tests COMMAND sn_tests)

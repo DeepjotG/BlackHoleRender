@@ -1,0 +1,21 @@
+#version 460 core
+// CPU/GPU agreement check for the galaxy model (BHS_GALAXY_SELFTEST=1): evaluates galaxySampleLod at
+// the given points; UniverseScene compares the results with detail::GalaxyEval.
+#include "galaxy_model.glsl"
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Galaxies { GalaxyGpu gals[]; };
+struct Query { vec4 pLod; uvec4 galaxy; };      // xyz: position rel. viewpoint (kpc), w: lod (kpc)
+layout(std430, binding = 1) readonly buffer Queries { Query queries[]; };
+layout(std430, binding = 2) writeonly buffer Results { vec4 results[]; };   // 2 per query
+uniform int uCount;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(uCount)) return;
+    vec3 light, neb;
+    float tau;
+    galaxySampleLod(gals[queries[i].galaxy.x], queries[i].pLod.xyz, queries[i].pLod.w, light, neb, tau);
+    results[2u * i] = vec4(light, tau);
+    results[2u * i + 1u] = vec4(neb, 0.0);
+}

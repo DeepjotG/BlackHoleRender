@@ -30,8 +30,8 @@ cmake --build build
 ./build/blackhole
 ```
 
-System requirements: a C++20 compiler, CMake 3.24+, Python 3 with `jinja2` (for the OpenGL
-loader generator), the X11/Wayland development headers and libEGL.
+System requirements: a C++20 compiler, CMake 3.24+, Ninja (`ninja-build`, optional but faster),
+Python 3 with `jinja2` (for the OpenGL loader generator), the X11/Wayland development headers and libEGL.
 
 ### Which GPU renders, and how the picture reaches the screen
 
@@ -92,6 +92,181 @@ The renderer also supersamples progressively whenever the camera is still, so a 
 keeps sharpening for a few seconds on any preset. *Dynamic resolution* in the Quality panel
 holds a target frame time by scaling the internal resolution.
 
+## Mass, time and planets
+
+* **Black hole mass:** the *Black hole & time* panel has a mass slider from a few suns to ten
+  billion, with presets for a stellar-mass hole, Sagittarius A*, Gargantua (the default, 100 million
+  suns) and M87*. The hole looks the same at every mass (everything near it is measured in units of
+  its mass); what changes is how big physical things such as planets and stars are next to it, and
+  how strong its tides are.
+* **Time warp:** from slow motion to a thousand years per second, with presets. Orbits, and later
+  the star disruption, follow the simulated clock; the disk's swirl keeps its own pace so it stays
+  readable. P pauses everything.
+* **Planets:** three Interstellar-inspired worlds on exact circular Schwarzschild orbits: Miller
+  (an ocean world just outside the innermost stable orbit), Mann (ice) and Edmunds (desert). Each
+  shows its orbital period, speed and how much slower time runs there, and warns when an orbit is
+  unstable or when the hole's tides would tear the planet apart at the current mass. Planets are
+  lensed like everything else, lit by the accretion disk, and drawn at their real size, so from the
+  default view they are smaller than a pixel: use *Travel*.
+* **Travel:** the *Travel* panel flies you to the black hole or any planet. Near a planet the camera
+  rides along with it (Miller moves at almost half the speed of light). Flight speed follows the
+  distance to the nearest surface, so you can creep along a planet's horizon or cross the system in
+  seconds; scroll to scale it, Shift for 5x.
+
+## The 3D universe
+
+The *Universe* panel switches between three skies:
+
+* **Painted backdrop:** the original look. Galaxies, nebulae and the Milky Way are painted onto a
+  sky infinitely far away; it is lensed correctly but nothing in it has a position.
+* **Invented 3D universe:** a generated universe (change the seed for another one). The black hole
+  sits on a spiral arm of a Milky-Way-sized galaxy (often barred), with its spin tilted so the
+  galaxy's band and glowing bulge cross behind it, lensed into an Einstein ring around the shadow.
+  Every star has a real position: about 200,000 are generated around you from the galaxy's
+  structure (blue giants crowd the arms, orange giants the old disk), and the ones you fly close to
+  have planets. A few notable stars nearby have names (a blue and a red supergiant, a Sun-like
+  star, a white dwarf, a binary...). Satellite galaxies, a big neighbour spiral and ~29,000
+  galaxies in clusters, groups and filaments fill the universe. You can fly into any of them, or
+  look at your own galaxy from outside.
+* **Real 3D universe:** 119,613 real stars from the HYG catalogue, a model of the Milky Way and the
+  solar system's planets at today's positions. The black hole is Sagittarius A* at the centre of the
+  Milky Way (with its real mass, 4.3 million suns), or a fictional Gargantua placed near the Sun so
+  the real constellations surround it. About 45,000 real galaxies (the Local Group, the Updated
+  Nearby Galaxy Catalog and the 2MASS Redshift Survey, with Andromeda, M81, M51...) come from
+  tables that may not be redistributed, so they are downloaded once on your machine: press
+  *Download the real galaxies* in the Universe panel, or run `python3 tools/fetch_real_catalogs.py`
+  (a few minutes; see `assets/real/README.md`).
+
+How it is drawn: the stars are projected from the camera every frame on the GPU and looked up by
+the ray tracer through the same lensing-aware math as before, so real stars stretch into arcs
+around the black hole. Galaxies are 3D models (bulge, bar, a disk of old stars, spiral arms of
+young blue stars with pink star-forming nebulae, and dust that reddens what lies behind it); their
+light is ray-marched into a sky texture rebuilt from wherever you are, a strip at a time while you
+travel. Distant galaxies are drawn as images oriented as they are in space. Stars close to the
+camera become glowing, boiling discs with spots, and planets become lensed spheres.
+
+**Travelling:** the *Travel* panel lists every named star, galaxy and place, with a search box and a
+*Surprise me* button; flights cross any distance in a few seconds. In free flight the speed
+follows the distance to the nearest surface (horizon, planet or star); **T** toggles a 1000x turbo
+for crossing interstellar space by hand.
+
+## Star disruption
+
+The *Star disruption* panel spawns a star on a plunging orbit and simulates the black hole tearing
+it apart on the GPU: the star stretches into a long stream, half of the gas escapes, the bound half
+falls back, crashes into itself and forms a hot disk, and whatever crosses the horizon is eaten.
+The gas is rendered with the same lensing as everything else.
+
+* **Spawn star plays the selected scenario exactly**, including its black hole mass (your own comes
+  back when the event is over); changing the star, the orbit or the mass by hand turns it into
+  *Custom*, which keeps the current black hole.
+* **Scenarios** pick a black hole mass, a star and an orbit, e.g. a Sun-like star around
+  Sagittarius A* (torn apart close to the hole and strongly lensed) or a red supergiant around
+  Gargantua. Whether a star is torn apart depends on its size and the hole's mass: Gargantua
+  swallows Sun-like stars whole.
+* **Penetration (beta)** sets how deep the orbit dives (pericentre = tidal radius / beta).
+* **Auto time warp** keeps the event watchable: the fall-in takes days to centuries of simulated
+  time depending on the scenario, and the debris keeps returning for much longer. The event runs on
+  its own clock (shown in the panel); the planets and the rest of the world keep your time warp.
+* **What it is doing** is captioned at the bottom of the screen (and in the panel), in five stages:
+  falling in; torn apart (slow motion through the closest approach); the stream flies out (a
+  time-lapse, weeks in seconds, that brakes just before the gas comes back, predicted from the
+  debris' orbits); falling back (the returning gas crashes into the stream still falling in and
+  heats up); feeding the black hole (the gas settles into a disk and spirals in). The whole event
+  takes about a minute and a half.
+* **The camera** films the event in three shots joined by cuts through black, so each change of
+  view is deliberate: riding with the star, a fixed distance from it, as it falls in (the black hole
+  looming behind it), is squeezed and stretched at the closest approach, and lengthens into a stream
+  flowing past the camera (a Sun-like star is a twentieth of the shadow's size, so the tearing is a
+  close-up); riding behind the departing stream with the hole shrinking in the distance; and a slow
+  push-in over the hole as the gas comes back, circles it in a ring and spreads into the disk. Fly
+  or look around at any time to take over; *Watch* hands the camera back.
+* **The steady accretion disk fades out** during an event (a real disruption happens around a quiet
+  black hole and builds its own disk from the debris): the returning gas circularises in a ring at
+  about twice the pericentre distance, which spreads inward and brightens into the disk again while
+  the hot cloud around the hole condenses into it, spiralling inwards. *Clear* ends the event (the
+  disk also returns by itself after a star is swallowed whole), and *Keep the steady disk* keeps it
+  throughout. The disk's on/off switch and rotation speed are in the *Black hole & time* section.
+* **Gas brightness and opacity** (Star disruption panel) scale the debris' glow and absorption.
+
+How it is simulated: until it reaches about twice the tidal radius the star moves rigidly on an
+exact Schwarzschild orbit; then it becomes 262,144 particles (a polytrope in hydrostatic balance)
+whose pressure, shock heating, cooling and self-gravity are computed on nested 64^3 grids around
+the star and the hole, with general-relativistic orbits for every particle and accretion at the
+horizon. The gas is drawn from the particles themselves: each becomes a small, soft splat at the
+places the black hole's lensing shows it (its direct image and the one round the far side of the
+hole), so the torn star stays sharp however near or far the camera is, and a stream thinner than a
+pixel is drawn as a pixel-wide line, as an optically thick stream would look.
+
+## Neutron-star merger (gamma-ray burst)
+
+The *Neutron star merger* panel puts a pair of neutron stars in orbit around the black hole and plays
+their collision: a short gamma-ray burst with its kilonova, directed in five stages like the star
+disruption, about two minutes long.
+
+* **Inspiral** (slow motion): two 1.4-solar-mass stars, 24 km across, start 120 km apart. Gravitational
+  waves drain the orbit (Peters' quadrupole formula), so the whirl tightens and quickens, the chirp,
+  until the stars touch about a second later after some sixty orbits. The camera rides with them, the
+  black hole looming behind.
+* **Merger**: they merge in a millisecond; a fiftieth of a solar mass of neutron-rich matter is flung
+  out at a fifth of the speed of light (slower and redder towards the orbital plane) and, a moment
+  later, twin jets a few degrees wide punch out along the spin axis inside a slower, wider cocoon.
+  The flash engulfs the close camera, which cuts to one outside the fireball; that camera then pulls
+  back steadily, keeping the swelling ball the same size while the black hole behind it shrinks (the
+  ejecta grow a hundred-thousand-fold in a minute), until it reaches the wide view.
+* **The burst** (time-lapse to about half an hour): the jets coast at almost the speed of light; their
+  spines follow light-like paths in the hole's gravity, so the one aimed a few degrees past the black
+  hole is visibly bent around it (aimed straight at it, it falls in). The ejecta swell into a
+  white-hot kilonova, the furnace that forges gold and platinum.
+* **The kilonova engulfs the black hole**: the jets fade into an afterglow while the still white-hot,
+  boiling cloud swells over the black hole until it fills most of the view.
+* **The days after** (time-lapse, from far out): the ejecta cool from white through yellow to red
+  (AT2017gfo's colour evolution) and turn transparent over ten days, dispersing the gold and
+  platinum they forged; then the event ends by itself.
+
+Scenarios set the black hole (yours comes back once the event is over), the binary's distance from
+it and the jet's aim; *Custom* keeps the current hole. *Deep space, far from any black hole* plays
+the burst on its own, beyond the renderer's lensing (straight rays, no disk, just the sky), to see
+the effect itself; the camera flies home afterwards.
+
+The stars, the merger remnant and the kilonova's photosphere are drawn as lensed bodies: the
+photosphere is an exploding one, big Rayleigh-Taylor plumes boiling on the event's own clock with
+hot bright heads and cool dark lanes, limb-darkened at the ejecta's temperature, turning transparent
+as the ejecta thin out. The kilonova's ragged outer fingers, the jets with their cocoons and the
+afterglow haloes round the jets' heads are particles drawn by the same lensed splat renderer as the
+disruption's gas: each splat carries its own size (no jumps between density levels), is drawn out
+along its motion where it streams (the jets, the fingers), is textured per pixel by a 3D noise that
+expands with the ejecta and flows along the jets, and is hidden behind bodies with a soft edge, so
+the clouds are continuous rather than a pile of discs, and nothing pops. The steady accretion disk is
+unaffected. Command line: `--grb N` plays scenario N (1-4) from the start.
+
+## Supernova
+
+The *Supernova* panel blows up a star in deep space (far from the black hole, beyond its lensing),
+directed in five stages over about eighty seconds in one continuous shot, with the physics of a
+Type II supernova kept to what shows:
+
+* **A dying star**: a red supergiant of fifteen Suns, seven hundred times the Sun's width, boiling at
+  3,500 K (or a blue supergiant like SN 1987A's), watched in real time from a slow orbit.
+* **Core collapse** (time-lapse): the core collapses in a fraction of a second; the shock takes half a
+  day to climb the envelope, during which nothing shows outside.
+* **Shock breakout**: the whole surface flashes to the colour table's limit for about the star's
+  light-crossing time (half an hour) and starts to fly apart.
+* **The star blows apart** (time-lapse): the envelope expands at ten thousand kilometres a second,
+  a hundredfold in two months, plumes of hot gas boiling through its surface while fingers of the
+  fastest ejecta grow beyond it; it cools from blue-white onto the hydrogen-recombination plateau
+  near 5,000 K. The camera pulls back as it swells, slower than it does, so it grows to fill the frame.
+* **The remnant** (years in seconds): the envelope thins out and turns transparent, showing the
+  remnant inside: a limb-brightened shell of filaments and knots of the inner ejecta lit by the decay
+  of cobalt-56, in regions of hydrogen red, oxygen teal and sulphur orange, the forward shock's faint
+  blue rim at its edge, and the pulsar in its blue wind nebula at the centre. It expands and fades
+  over three years while the camera eases back to show it whole; then the event ends by itself and
+  the camera flies home.
+
+The star and its exploding photosphere are a body (the same boiling, transparent-turning photosphere
+as the kilonova's); the ejecta fingers and the remnant are particles in the splat renderer, every
+pattern comoving with the ejecta. Command line: `--sn N` plays scenario N (1-2) from the start.
+
 ## Controls
 
 | Input | Action |
@@ -101,12 +276,13 @@ holds a target frame time by scaling the internal resolution.
 | Space / Ctrl | Up / down |
 | Q / E | Roll |
 | Shift | 5x boost |
-| Scroll | Change base speed (speed also scales with distance to the hole) |
+| Scroll | Change base speed (speed also scales with the distance to the nearest surface) |
 | 1-4 | Fly to bookmarks (Interstellar shot, photon-sphere skim, top-down, far) |
 | R | Reset view |
 | O | Auto-orbit |
 | L | Toggle lensing |
-| P | Pause the disk |
+| P | Pause the simulation clock and the disk |
+| T | Turbo: 1000x flight speed |
 | H | Hide the panel |
 | F2 / F3 | Screenshot / cinematic 4K capture (24 accumulated samples) |
 | F5 | Reload shaders (they also hot-reload on save) |
@@ -121,10 +297,22 @@ holds a target frame time by scaling the internal resolution.
 --benchmark                      time every preset and print a table
 --lensing 0|1  --disk none|thin|volumetric  --doppler 0..1  --debug steps|footprint|nan
 --fullscreen --width W --height H --seed N --vsync 0|1 --no-ui --no-capture
+--mass SUNS --warp X             black hole mass, simulated seconds per real second
+--universe backdrop|invented|real  which sky to start with
+--universe-seed N  --placement sgra|sun   invented universe seed; where the real black hole is
+--fov DEG                        vertical field of view
+--tde N                          start star-disruption scenario N (1-5, as listed in the panel)
+--grb N | --sn N                 start neutron-star merger scenario N (1-4) / supernova scenario N (1-2)
+--dt S                           fixed frame time in seconds (reproducible captures)
+--goto NAME | --fly NAME         start next to / fly to Miller, Mann, Edmunds, "black hole",
+                                 "nearest star", or any star, galaxy or place in the Travel list
 --igpu                           render on the integrated GPU
 --x11 | --wayland                force a window system (see "Which GPU renders" above)
 --gl-debug                       print OpenGL driver errors and warnings
 ```
+
+Options are for that launch only: a value they set is not saved at exit unless you changed it in
+the panel or pressed *Save settings*.
 
 ## Troubleshooting
 
@@ -169,6 +357,8 @@ sphere stability, redshift closed forms, far-field correction).
 ```
 src/            application (App, Camera, Renderer, SkyBaker, DiskTextures, Ui, Capture)
 src/physics/    CPU copy of the geodesic math used by the tests
+src/tde/ src/grb/ src/sn/   the star disruption, the neutron-star merger and the supernova:
+                models (CPU), GPU particles, and the directors that pace and film them
 shaders/        GLSL: blackhole.frag (tracer), geodesic/disk/sky includes, bake and post passes
 tests/          physics unit checks (ctest)
 run.sh          launcher with NVIDIA PRIME offload

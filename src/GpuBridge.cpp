@@ -123,10 +123,22 @@ bool GpuBridge::init(GLFWwindow* window, bool debugContext) {
 
     // Display-side objects first (window context is current), then switch to the NVIDIA one.
     displaySetup();
-    makeRenderCurrent();
+    if (!makeRenderCurrent()) {
+        error_ = "could not make the NVIDIA context current";
+        glDeleteProgram(dispProg_);
+        glDeleteVertexArrays(1, &dispVao_);
+        glDeleteTextures(1, &dispTex_);
+        dispProg_ = dispVao_ = dispTex_ = 0;
+        eglDestroyContext(dpy, ctx);
+        eglTerminate(dpy);
+        nvContext_ = nullptr;
+        nvDisplay_ = nullptr;
+        return false;
+    }
     const char* r = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     renderer_ = r ? r : "NVIDIA GPU";
     glGenBuffers(2, pbo_);
+    glGenQueries(2, timerQuery_);
     return true;
 }
 
@@ -143,9 +155,10 @@ void GpuBridge::displaySetup() {
     glGenTextures(1, &dispTex_);
 }
 
-void GpuBridge::makeRenderCurrent() {
-    if (!nvContext_) return;
-    eglMakeCurrent(static_cast<EGLDisplay>(nvDisplay_), EGL_NO_SURFACE, EGL_NO_SURFACE, static_cast<EGLContext>(nvContext_));
+bool GpuBridge::makeRenderCurrent() {
+    if (!nvContext_) return false;
+    return eglMakeCurrent(static_cast<EGLDisplay>(nvDisplay_), EGL_NO_SURFACE, EGL_NO_SURFACE,
+                          static_cast<EGLContext>(nvContext_)) == EGL_TRUE;
 }
 
 void GpuBridge::makeDisplayCurrent() { glfwMakeContextCurrent(window_); }
@@ -165,6 +178,7 @@ void GpuBridge::releaseBuffers() {
         if (fence_[i]) glDeleteSync(fence_[i]);
         fence_[i] = nullptr;
         pboW_[i] = pboH_[i] = 0;
+        pboCap_[i] = 0;
     }
 }
 
@@ -182,13 +196,7 @@ GLuint GpuBridge::backbuffer(int width, int height) {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) logError("bridge backbuffer incomplete ({}x{})", w_, h_);
-    const GLsizeiptr bytes = static_cast<GLsizeiptr>(w_) * h_ * 4;
-    releaseBuffers();
-    for (int i = 0; i < 2; ++i) {
-        glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_[i]);
-        glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
-    }
-    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    // Pixel buffers grow lazily in present(), so the frame already in flight survives a resize.
     return fbo_;
 }
 
@@ -203,7 +211,20 @@ void GpuBridge::present() {
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo_[cur]);
+    const GLsizeiptr bytes = static_cast<GLsizeiptr>(w_) * h_ * 4;
+    if (pboCap_[cur] < bytes) {   // pbo_[cur] was unmapped at the end of the previous present()
+        glBufferData(GL_PIXEL_PACK_BUFFER, bytes, nullptr, GL_STREAM_READ);
+        pboCap_[cur] = bytes;
+    }
+    if (timerIssued_[cur]) {
+        GLuint64 ns = 0;
+        glGetQueryObjectui64v(timerQuery_[cur], GL_QUERY_RESULT_NO_WAIT, &ns);
+        if (ns > 0) copyMs_ = copyMs_ <= 0.0f ? ns * 1e-6f : copyMs_ * 0.9f + ns * 1e-7f;
+    }
+    glBeginQuery(GL_TIME_ELAPSED, timerQuery_[cur]);
     glReadPixels(0, 0, w_, h_, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glEndQuery(GL_TIME_ELAPSED);
+    timerIssued_[cur] = true;
     if (fence_[cur]) glDeleteSync(fence_[cur]);
     fence_[cur] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     pboW_[cur] = w_;
@@ -273,6 +294,8 @@ void GpuBridge::shutdown() {
     makeRenderCurrent();
     releaseBuffers();
     if (pbo_[0]) glDeleteBuffers(2, pbo_);
+    if (timerQuery_[0]) glDeleteQueries(2, timerQuery_);
+    timerQuery_[0] = timerQuery_[1] = 0;
     if (fbo_) glDeleteFramebuffers(1, &fbo_);
     if (color_) glDeleteTextures(1, &color_);
     pbo_[0] = pbo_[1] = fbo_ = color_ = 0;

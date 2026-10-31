@@ -1,0 +1,226 @@
+#version 460 core
+// Star disruption: particle update for one hydro step of uStep.x (coordinate time).
+//  1. Hydro from the finest grid holding the particle with a 3-cell margin (fields of the previous
+//     deposit): relaxation towards the local mean flow (viscosity of compressions, noise damping; the
+//     kinetic energy removed heats the gas: shocks where streams collide), adiabatic work
+//     du = -(gamma - 1) u div(v) dtau of the resolved flow, cooling of the excess over the initial
+//     adiabat, pressure acceleration. The particle carries u itself (not its entropy), so moving
+//     between grids of different resolution, which see different densities, does not change it.
+//  2. Sub-cycled kick-drift-kick in proper time: black hole gravity, monopole self-gravity around the
+//     moving core (while gas is bound to a core, see TdeSim.cpp) and the (constant) pressure
+//     acceleration. Same step rule as TdePhysics.h.
+//  3. Accretion (r < 2.05 M), escape, non-finite guard, statistics. The bound fraction classifies the
+//     gas of a self-bound core (while uInfo.w = 1) by the core's orbital energy, all other gas by its own.
+#include "tde_common.glsl"
+
+layout(local_size_x = 256) in;
+
+shared uint shDt[NDT];
+shared uint shCount[7];     // active, bound, accreted, escaped, nan, capped, substeps
+shared float shDiss[256];
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    for (uint b = lid; b < uint(NDT); b += 256u) shDt[b] = 0u;
+    if (lid < 7u) shCount[lid] = 0u;
+    barrier();
+
+    uint i = gl_GlobalInvocationID.x;
+    bool lastStep = uStep.w > 0.5;
+    bool bh = uPhys.x > 0.5;
+    float dissipated = 0.0;
+    if (i < uint(uInfo.x) && pPos[i].w == 0.0) {
+        vec3 x = pPos[i].xyz;
+        vec4 V = pVel[i];
+        vec3 v = V.xyz;
+        float u = V.w;                 // specific internal energy (c^2)
+        vec4 X = pAux[i];
+        float A0 = X.x;                // entropy of the initial adiabat: the cooling floor
+        float rhoP = X.w;
+        float dt = uStep.x;
+        float r = max(length(x), 1e-6);
+        float lap = lapseOf(x, v);
+        float dtau = dt * lap;
+
+        // ---------------------------------------------------------------- hydro
+        int g = -1;
+        float cell = 0.0;
+        vec3 s = vec3(0.0);
+        for (int k = 0; k < NGRID; ++k) {
+            vec4 geo = uGridFld[k];
+            if (geo.w <= 0.0) continue;
+            float c = gridCell(geo);
+            vec3 sk = gridCoord(geo, x);
+            if (insideMargin(sk, 3.0) && (g < 0 || c < cell)) {
+                g = k;
+                cell = c;
+                s = sk;
+            }
+        }
+        vec3 aH = vec3(0.0);
+        float heat = 0.0;
+        float dtReq = 1e30;
+        if (g >= 0) {
+            vec4 fa, fb;
+            float fc;
+            sampleFields(g, s, fa, fb, fc);
+            float rho = fa.w;
+            if (rho > 1e-30) {
+                // Relaxation towards the local mean flow at the rate C max(-div v, 0) + kappa c_s / cell.
+                // The first term is the viscosity of shocks and colliding streams: gas forgets its
+                // velocity deviation at the rate it is compressed (stretching streams and pure shear
+                // are not dissipated, even where a coarse cell cannot separate them from other gas).
+                // The second damps the grid noise of the particle method, which otherwise grows on a
+                // few cell sound-crossing times in pressure-supported gas. Flows the grid resolves
+                // (linear velocity fields) are reproduced by the interpolation and left untouched; the
+                // kinetic energy removed heats the gas.
+                float csNow = sqrt(GAMMA * (GAMMA - 1.0) * max(u, 0.0));
+                vec3 w = v - fb.xyz / rho;
+                float wl = length(w);
+                float divv = fc / rho;
+                float compression = max(-divv, 0.0);
+                float f = 1.0 - exp(-dtau * (uPhys.y * compression + uExtra.y * csNow / cell));
+                float du = 0.5 * wl * wl * (1.0 - (1.0 - f) * (1.0 - f));
+                v -= f * w;
+                u *= exp(clamp(-(GAMMA - 1.0) * divv * dtau, -2.0, 2.0));
+                u += du;
+                dissipated = du;
+                heat = du / max(dtau, 1e-30);
+                // Radiative cooling of the excess over the initial adiabat at the current density.
+                float tcool = uPhys.z * TDE_TWO_PI * r * sqrt(r);
+                float uFloor = A0 * pow(rho, GAMMA - 1.0) / (GAMMA - 1.0);
+                if (u > uFloor && bh) u = uFloor + (u - uFloor) * exp(-dtau / max(tcool, 1e-30));
+                // Gas bound to the hole cannot be hotter than its gravitational energy.
+                u = min(u, bh ? 0.5 / max(r, 2.0) : 1.0);
+                rhoP = rho;
+                aH = -fa.xyz * (uExtra.x / rho);
+                float al = length(aH);
+                float aCap = uLimit.x * cell / max(dt * dt, 1e-30);
+                if (al > aCap) {
+                    aH *= aCap / al;
+                    al = aCap;
+                }
+                float cs = sqrt(GAMMA * (GAMMA - 1.0) * max(u, 0.0));
+                // Sound crossing of a cell (the relaxation itself is unconditionally stable).
+                dtReq = min(dtReq, uLimit.y * cell / (cs + 1e-30));
+                dtReq = min(dtReq, uLimit.z * sqrt(cell / max(al, 1e-30)));
+                if (bh) dtReq = min(dtReq, uLimit.w * TDE_TWO_PI * r * sqrt(r));
+            }
+        }
+
+        // ---------------------------------------------------------------- sub-cycle
+        bool sg = uMono.z > 0.5 && cPos.w > 0.5 && uExtra.z > 0.0;
+        int maxSub = int(uStep.z);
+        float tsg = 1e30;
+        vec3 aS = sg ? selfGravity(x, coreAt(0.0), tsg) : vec3(0.0);
+        float ts0 = bh ? bhTimescale(r, angMom2(x, v), length(v)) : 1e30;
+        dtReq = min(dtReq, float(maxSub) * uStep.y * min(ts0, tsg) / lap);
+        float remaining = dt;
+        float t = 0.0;
+        int fate = 0;
+        bool capped = false;
+        uint substeps = 0u;
+        for (int k = 0; k < 256 && remaining > 0.0; ++k) {
+            ++substeps;
+            float rr = length(x);
+            float L2 = angMom2(x, v);
+            float lp = lapseOf(x, v);
+            float ts = bh ? bhTimescale(max(rr, 1e-6), L2, length(v)) : 1e30;
+            ts = min(ts, tsg);
+            int left = maxSub - k;
+            float h = min(uStep.y * ts / lp, remaining);
+            if (left <= 1) {
+                h = remaining;
+            } else if (h * float(left) < remaining) {
+                h = remaining / float(left);
+                capped = true;
+            }
+            float dtauS = h * lp;
+            vec3 aB = bh ? bhAccel(x, L2) : vec3(0.0);
+            v = clampSpeed(v + (0.5 * dtauS) * (aB + aH + aS));
+            vec3 x0 = x;
+            x += dtauS * v;
+            t += h;
+            if (bh && segMinRadius(x0, x) < R_ACCRETE) {
+                fate = 1;
+                break;
+            }
+            if (sg) aS = selfGravity(x, coreAt(t), tsg);
+            aB = bh ? bhAccel(x, angMom2(x, v)) : vec3(0.0);
+            v = clampSpeed(v + (0.5 * dtauS) * (aB + aH + aS));
+            remaining -= h;
+        }
+
+        // ---------------------------------------------------------------- fate and statistics
+        bool finiteState = all(lessThan(abs(x), vec3(1e30))) && all(lessThan(abs(v), vec3(1e30))) && abs(u) < 1e30;
+        if (!finiteState) {
+            fate = 3;
+        } else if (fate == 0) {
+            r = length(x);
+            if (r > uPhys.w && (!bh || specificEnergy(x, v) >= 1.0)) fate = 2;
+            // Gas falling into a frozen remnant joins it (its rigid gas cannot respond to it).
+            else if (uFrozen.w > 0.5 && length(x - uFrozen.xyz) < uFrozenVel.w) fate = 4;
+        }
+        if (fate == 1) atomicAdd(shCount[2], 1u);
+        if (fate == 2 || fate == 3) atomicAdd(shCount[3], 1u);
+        if (fate == 3) atomicAdd(shCount[4], 1u);
+        if (capped) atomicAdd(shCount[5], 1u);
+        if (lastStep) atomicAdd(shCount[6], substeps);
+        if (fate == 0 && lastStep) {
+            atomicAdd(shCount[0], 1u);
+            // While a self-bound core exists (uInfo.w = 1, decided on the CPU), the gas bound to it moves
+            // with it: it counts as bound to the hole if the core is (the core's state at the end of this
+            // step), so that internal motions and its extent do not split a remnant between bound and
+            // unbound. All other gas is classified by its own orbital energy.
+            vec3 xo = x, vo = v;
+            if (uInfo.w == 1 && uMono.z > 0.5 && cPos.w > 0.5 && boundToCore(x - cTraj[TRAJ].xyz, v - cEndVel.xyz)) {
+                xo = cTraj[TRAJ].xyz;
+                vo = cEndVel.xyz;
+            }
+            if (bh && specificEnergy(xo, vo) < 1.0) atomicAdd(shCount[1], 1u);
+            int bin = clamp(int(floor(2.0 * log2(max(dtReq, 1e-30)))) + 64, 0, NDT - 1);
+            atomicAdd(shDt[bin], 1u);
+        }
+        if (fate == 3) {
+            pPos[i] = vec4(pPos[i].xyz, 2.0);
+        } else if (fate == 4) {
+            pPos[i] = vec4(x - uFrozen.xyz, 4.0);
+            pVel[i] = vec4(0.0, 0.0, 0.0, max(u, 0.0));
+            pAux[i] = vec4(A0, 0.0, max(u, 0.0), rhoP);
+            atomicAdd(sWords[S_FROZEN], 1u);
+        } else {
+            pPos[i] = vec4(x, fate == 0 ? 0.0 : (fate == 1 ? 1.0 : 2.0));
+            pVel[i] = vec4(v, max(u, 0.0));
+            pAux[i] = vec4(A0, heat, max(u, 0.0), rhoP);
+        }
+    }
+
+    // Workgroup reductions, then one global atomic per counter.
+    shDiss[lid] = dissipated / uVis.w;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) shDiss[lid] += shDiss[lid + stride];
+        barrier();
+    }
+    if (lid == 0u) {
+        if (shCount[0] != 0u) atomicAdd(sWords[S_ACTIVE], shCount[0]);
+        if (shCount[1] != 0u) atomicAdd(sWords[S_BOUND], shCount[1]);
+        if (shCount[2] != 0u) atomicAdd(sWords[S_ACCRETED], shCount[2]);
+        if (shCount[3] != 0u) atomicAdd(sWords[S_ESCAPED], shCount[3]);
+        if (shCount[4] != 0u) atomicAdd(sWords[S_NAN], shCount[4]);
+        if (shCount[5] != 0u) atomicAdd(sWords[S_CAPPED], shCount[5]);
+        if (shCount[6] != 0u) atomicAdd(sWords[S_SUBSTEPS], shCount[6]);
+        float dsum = min(shDiss[0], 4.0e18);
+        if (dsum >= 1.0) {
+            uint hi = uint(dsum * 2.3283064365386963e-10);
+            uint lo = uint(min(dsum - float(hi) * 4294967296.0, 4294967040.0));
+            uint old = atomicAdd(sWords[S_DISS], lo);
+            uint hiAdd = hi + ((old + lo < old) ? 1u : 0u);
+            if (hiAdd != 0u) atomicAdd(sWords[S_DISS + 1], hiAdd);
+        }
+    }
+    if (lastStep) {
+        for (uint b = lid; b < uint(NDT); b += 256u)
+            if (shDt[b] != 0u) atomicAdd(sWords[S_DTHIST + int(b)], shDt[b]);
+    }
+}

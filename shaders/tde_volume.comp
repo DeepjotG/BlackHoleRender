@@ -1,0 +1,149 @@
+#version 460 core
+// Star disruption: writes the rendering volume of grid uGrid (RGBA16F, see TdeSim.h) from its fields
+// through the visual mapping of tde_visual.glsl. Overlapping grids share the gas so that the tracer
+// can simply add the volumes:
+//  * nest levels: level g keeps the fraction in_g(p) * prod over finer levels j of (1 - in_j(p)), where
+//    in_j ramps from 0 at 1.5 cells inside j's boundary to 1 a further uRamp[j] inside (the weights
+//    sum to one wherever a level covers p);
+//  * grid 0, while it feeds the nest by restriction (uInfo.z = 1): grid 0 renders in_0 of its gas and
+//    the nest renders its gas minus that owned part, an exact split however small grid 0 is compared
+//    with a nest cell. Otherwise grid 0 simply joins the product above as one more, finer, grid.
+// The outermost texels are always zero, so clamp-to-edge sampling is harmless.
+//
+// Noise fade (tde_visual.glsl): gas with fewer than NOISE_PART particles' worth per cell is faded, but
+// "per cell" must not depend on which grid renders the point, or the same gas would get a different
+// opacity in a fine and in a coarse grid and show seams where their ownership ramps meet. Every grid
+// therefore takes the count from one reference: the cells of the coarsest nest level (uFadeLevel),
+// smoothed over its 3^3 neighbourhood. That level's pass (dispatched first) writes the count of each
+// of its texels to uFadeOut; the other grids sample it trilinearly at their texel centres (uFadeRef).
+// Outside the reference level (grid 0 far from the hole) a grid uses its own count, blended across the
+// reference level's ownership ramp.
+#include "tde_common.glsl"
+#include "tde_visual.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;   // one block per workgroup
+layout(rgba16f, binding = 0) uniform writeonly image3D uVolume;
+layout(r16f, binding = 1) uniform writeonly image3D uFadeOut;     // written by the reference level only
+layout(binding = 15) uniform sampler3D uFadeRef;                  // sampled by every other grid
+
+uniform int uGrid;
+uniform int uFadeLevel;    // the reference level for the noise fade, -1 if none
+uniform int uUnweighted;   // diagnostics: 1 = no ownership weights (each grid shows all of its gas)
+
+float insideRamp(int j, vec3 p) { return insideRampGeo(uGridFld[j], uRamp[j], p); }
+
+float ownership(int g, vec3 p, bool split) {
+    float w = insideRamp(g, p);
+    if (split && g == 0) return w;
+    float cg = gridCell(uGridFld[g]);
+    for (int j = 0; j < NGRID; ++j) {
+        if (j == g || uGridFld[j].w <= 0.0 || (split && j == 0)) continue;
+        float cj = gridCell(uGridFld[j]);
+        if (cj < cg || (cj == cg && j < g)) w *= 1.0 - insideRamp(j, p);
+    }
+    return w;
+}
+
+// Gas of one cell for rendering, decoded from the accumulators (valid everywhere: outside the
+// dilated set they are zero): mass in particles' worth, momentum (particles x velocity), energy and
+// heating sums in the fixed-point units of the deposit, and the cell's whole mass (`total`). With
+// `split`, nest cells drop the part grid 0 renders itself; the velocity stays that of all the gas in
+// the cell, and `total` keeps that part too (it counts particles, whoever renders them).
+void cellGas(int g, ivec3 c, bool split, inout float mass, inout vec3 mom, inout float ener, inout float heat, inout float total) {
+    if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(RES)))) return;
+    int cell = cellIndex(c);
+    float m = float(gAcc[accIndex(g, W_MASS, cell)]);
+    if (m <= 0.0) return;
+    total += m;
+    vec3 p = vec3(accRead64(accIndex(g, W_MOM, cell)), accRead64(accIndex(g, W_MOM + 2, cell)), accRead64(accIndex(g, W_MOM + 4, cell)));
+    float e = accRead64(accIndex(g, W_ENER, cell));
+    float h = accRead64(accIndex(g, W_HEAT, cell));
+    if (split && g > 0) {
+        float own = float(gAcc[accIndex(g, W_OWN_MASS, cell)]);
+        float keep = clamp((m - own) / m, 0.0, 1.0);
+        m *= keep;
+        p *= keep;
+        e = max(e - accRead64(accIndex(g, W_OWN_ENER, cell)), 0.0);
+        h = max(h - accRead64(accIndex(g, W_OWN_HEAT, cell)), 0.0);
+    }
+    mass += m;
+    mom += p;
+    ener += e;
+    heat += h;
+}
+
+// Sparse gas is rendered with a smoothed average of the 3^3 neighbourhood: below SMOOTH_PART particles'
+// worth per cell on average, the average replaces the cell (blending in above). The weights are a
+// separable tent, (1, 2, 1) / 4 per axis, which sums to one, so the smoothing conserves what is rendered,
+// and an isolated particle becomes a soft round blob rather than a flat-topped cube; sparse gas, such as
+// the few particles of an early disk, shows as a smooth haze rather than as specks. The block and a
+// one-cell apron are decoded once into shared memory.
+const float SMOOTH_PART = 4.0;
+const int AP = BLK + 2;
+shared vec4 shGas[AP * AP * AP];   // mass, energy, heat (fixed-point sums of the deposit), whole mass
+shared vec3 shMom[AP * AP * AP];
+
+void main() {
+    ivec3 c = ivec3(gl_GlobalInvocationID);
+    int g = uGrid;
+    bool reference = g == uFadeLevel;
+    ivec3 bc = ivec3(gl_WorkGroupID);
+    if ((gBlk[g * BLOCKS + (bc.z * NBLK + bc.y) * NBLK + bc.x] & 2u) == 0u) {
+        imageStore(uVolume, c, vec4(0.0));   // no gas within a block of here
+        if (reference) imageStore(uFadeOut, c, vec4(0.0));
+        return;
+    }
+    bool split = uInfo.z == 1;
+    ivec3 origin = bc * BLK - 1;
+    for (int j = int(gl_LocalInvocationIndex); j < AP * AP * AP; j += BLK * BLK * BLK) {
+        float mass = 0.0, ener = 0.0, heat = 0.0, total = 0.0;
+        vec3 mom = vec3(0.0);
+        cellGas(g, origin + ivec3(j % AP, (j / AP) % AP, j / (AP * AP)), split, mass, mom, ener, heat, total);
+        shGas[j] = vec4(mass, ener, heat, total);
+        shMom[j] = mom;
+    }
+    barrier();
+
+    vec4 geo = uGridFld[g];
+    vec3 p = geo.xyz + geo.w * (2.0 * (vec3(c) + 0.5) / float(RES) - 1.0);
+    ivec3 l = c - origin;
+    vec4 boxGas = vec4(0.0);
+    vec3 boxMom = vec3(0.0);
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                int k = ((l.z + dz) * AP + l.y + dy) * AP + l.x + dx;
+                float wk = float((2 - abs(dx)) * (2 - abs(dy)) * (2 - abs(dz))) / 64.0;   // tent, sums to 1
+                boxGas += wk * shGas[k];
+                boxMom += wk * shMom[k];
+            }
+    // Particles' worth per cell around here, all gas counted (the noise fade's measure).
+    float ownCount = boxGas.w / uScale.x;
+    if (reference) imageStore(uFadeOut, c, vec4(min(ownCount, 6.0e4), 0.0, 0.0, 0.0));
+
+    vec4 o = vec4(0.0);
+    float w = ownership(g, p, split);
+    if (w > 0.0 || uUnweighted != 0) {
+        int centre = (l.z * AP + l.y) * AP + l.x;
+        vec3 gas = shGas[centre].xyz;
+        vec3 mom = shMom[centre];
+        float t = smoothstep(0.5, 1.0, boxGas.x / (SMOOTH_PART * uScale.x));
+        gas = mix(boxGas.xyz, gas, t);
+        mom = mix(boxMom, mom, t);
+        if (gas.x > 0.0) {
+            float fadeCount = ownCount;
+            if (uFadeLevel >= 0 && !reference) {
+                vec4 ref = uGridFld[uFadeLevel];
+                float in3 = insideRampGeo(ref, uRamp[uFadeLevel], p);
+                if (in3 > 0.0) fadeCount = mix(ownCount, textureLod(uFadeRef, (p - ref.xyz) / (2.0 * ref.w) + 0.5, 0.0).r, in3);
+            }
+            float cs = gridCell(geo);
+            float invNV = 1.0 / (uScale.w * cs * cs * cs);
+            float nPart = gas.x / uScale.x;
+            o = tdeVisual(nPart * invNV, gas.y * invNV / uScale.y, mom * (invNV / MOM_SCALE), gas.z * invNV / uScale.z, p, nPart);
+            o.x *= tdeNoiseFade(fadeCount);
+            if (uUnweighted == 0) o.x *= w;
+        }
+    }
+    imageStore(uVolume, c, o);
+}

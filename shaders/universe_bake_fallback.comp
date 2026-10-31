@@ -1,0 +1,5 @@
+#version 460 core
+// Diffuse sky of the 3D universe with the simple fallback galaxy model (used only while
+// shaders/galaxy_model.glsl is not available).
+#include "galaxy_model_fallback.glsl"
+#include "universe_bake_body.glsl"

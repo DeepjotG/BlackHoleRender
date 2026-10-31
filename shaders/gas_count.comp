@@ -1,0 +1,90 @@
+#version 460 core
+// Counts the star-disruption particles per cell on every level of gas_hash.glsl, and gathers a few
+// statistics of the debris for the camera and the pacing of the event (binding 14, after the indirect
+// draw command), among them when the bound gas far out will be back at pericentre.
+layout(local_size_x = 256) in;
+#include "tde_params.glsl"
+#include "gas_hash.glsl"
+
+// Per-workgroup aggregation: neighbouring particles mostly share cells, so each level's counts are
+// gathered in a small shared table first and flushed with one atomic per distinct cell.
+const uint GROUP_SLOTS = 256u;
+shared uint gKey[GROUP_SLOTS];
+shared uint gFirst[GROUP_SLOTS];
+shared uint gCnt[GROUP_SLOTS];
+
+layout(std430, binding = 0) readonly buffer PartPos { vec4 pPos[]; };
+layout(std430, binding = 1) readonly buffer PartVel { vec4 pVel[]; };
+const int RETURN_BINS = 160;   // log10 bins of 1/16 decade, from 1 M
+layout(std430, binding = 14) buffer DrawCmd {
+    uint cmdCount, cmdInstances, cmdFirst, cmdBase;
+    uint sDrawn;        // particles still in play
+    uint sNear;         // ... within uNearR of the hole
+    int sLo[3], sHi[3]; // bounding box of the particles in play, as order-preserving integers
+    uint sReturn[RETURN_BINS];   // bound particles beyond uFarR, by the time until their next pericentre
+};
+uniform int uCount;
+uniform float uNearR;
+uniform float uFarR;
+
+int orderedInt(float f) {
+    int i = floatBitsToInt(f);
+    return i >= 0 ? i : i ^ 0x7FFFFFFF;
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    uint lid = gl_LocalInvocationID.x;
+    bool drawn = i < uCount;
+    vec4 pos = drawn ? pPos[i] : vec4(0.0);
+    drawn = drawn && gasParticleDrawn(pos);
+    vec3 p = gasParticlePosition(pos, uFrozen.xyz);
+    drawn = drawn && !(any(isnan(p)) || any(isinf(p)));
+    for (int lv = 0; lv < HASH_LEVELS; ++lv) {   // every invocation runs the barriers
+        gKey[lid] = 0u;
+        gCnt[lid] = 0u;
+        barrier();
+        if (drawn) {
+            uvec2 ks = hashCell(p, lv);
+            uint slot = ks.y & (GROUP_SLOTS - 1u);
+            for (uint k = 0u; k < GROUP_SLOTS; ++k) {   // at most 256 distinct keys: a slot is always found
+                uint prev = atomicCompSwap(gKey[slot], 0u, ks.x);
+                if (prev == 0u || prev == ks.x) {
+                    if (prev == 0u) gFirst[slot] = ks.y;
+                    atomicAdd(gCnt[slot], 1u);
+                    break;
+                }
+                slot = (slot + 1u) & (GROUP_SLOTS - 1u);
+            }
+        }
+        barrier();
+        if (gKey[lid] != 0u) hashAddKey(gKey[lid], gFirst[lid], gCnt[lid]);
+        barrier();
+    }
+    if (!drawn) return;
+    atomicAdd(sDrawn, 1u);
+    if (dot(p, p) < uNearR * uNearR) atomicAdd(sNear, 1u);
+    for (int k = 0; k < 3; ++k) {
+        atomicMin(sLo[k], orderedInt(p[k]));
+        atomicMax(sHi[k], orderedInt(p[k]));
+    }
+    // Far out the orbit is Keplerian to good accuracy. The energy is the exact (conserved) Schwarzschild one
+    // (specificEnergy() in tde_common.glsl), so the estimate does not drift as the gas moves.
+    float r = length(p);
+    if (r > uFarR) {
+        vec3 v = pVel[i].xyz + (int(pos.w) == 4 ? uFrozenVel.xyz : vec3(0.0));
+        float vr = dot(p, v) / r;
+        vec3 l = cross(p, v);
+        float L2 = dot(l, l);
+        float eps = 0.5 * ((1.0 - 2.0 / r) * (1.0 + L2 / (r * r)) + vr * vr - 1.0);
+        if (eps < 0.0) {
+            float a = -0.5 / eps;
+            float e = sqrt(max(1.0 - L2 / a, 0.0));
+            float E = acos(clamp((1.0 - r / a) / max(e, 1e-6), -1.0, 1.0));   // eccentric anomaly
+            if (vr < 0.0) E = TWO_PI - E;                                     // past apocentre
+            float tNext = (TWO_PI - (E - e * sin(E))) * a * sqrt(a);
+            int bin = clamp(int(floor(log(max(tNext, 1.0)) * (16.0 / log(10.0)))), 0, RETURN_BINS - 1);
+            atomicAdd(sReturn[bin], 1u);
+        }
+    }
+}

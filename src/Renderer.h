@@ -3,7 +3,9 @@
 #include <glm/glm.hpp>
 
 #include <string>
+#include <vector>
 
+#include "GasParticles.h"
 #include "Shader.h"
 
 namespace bhs {
@@ -11,16 +13,42 @@ namespace bhs {
 class Camera;
 struct Settings;
 
+// One gas volume of the star-disruption simulation (see tde/TdeSim.h).
+struct GasVolumeRef {
+    GLuint texture = 0;
+    glm::vec3 center{0.0f};
+    float halfSize = 0.0f;
+    int resolution = 0;
+};
+
 struct FrameInput {
     const Camera* camera = nullptr;
     const Settings* settings = nullptr;
-    float time = 0.0f;   // disk animation time (seconds)
+    float time = 0.0f;   // seconds since start (film grain)
+    float diskTime = 0.0f;   // disk flow clock in M, wrapped to the noise cross-fade period
     float dt = 0.0f;
     int windowW = 0, windowH = 0;
     GLuint skyCubemap = 0, noise3d = 0, blackbodyLut = 0;
     bool resetAccumulation = false;
     bool diskAnimating = true;
+    float diskFade = 1.0f;        // 0..1: the steady accretion disk fades out during a star disruption
+    bool debrisDisk = false;      // ... and the disk built by its debris is drawn instead (faded by diskFade)
+    float debrisRing = 18.0f;     // M: where the returning gas circularises; the disk spreads inward from there
     GLuint targetFbo = 0;   // final framebuffer (0 = window)
+    float extraGpuMs = 0.0f; // GPU work outside the renderer (bridge readback), for frame-time targets
+    const std::vector<struct BodyGpu>* bodies = nullptr;
+    bool farMode = false;    // camera far from the hole: straight rays
+    const GasVolumeRef* gas = nullptr;
+    int gasCount = 0;
+    float gasRefLen = 1.0f;       // M, see uGasRefLen in gas.glsl
+    const GasParticlesRef* particles = nullptr;   // star-disruption particles, drawn instead of the volumes
+    const GasParticlesRef* particlesB = nullptr;  // a second set: the neutron-star merger's kilonova and jets
+    // 3D universe sky (see UniverseScene)
+    bool universe = false;
+    GLuint uniCube = 0, uniStars = 0, uniTiles = 0;
+    float uniStarScale = 1.0f;
+    float uniSkyScale = 1.0f;     // exposure of the universe's diffuse light
+    int uniTileGrid = 128;
     int debugView = 0;
 };
 
@@ -45,6 +73,9 @@ public:
     float autoExposureGain() const { return autoGain_; }
     const std::string& shaderLog() const { return shaderLog_; }
     bool shadersOk() const;
+    bool gasParticlesOk() const { return gasParticles_.valid(); }
+    const GasParticleStats& gasParticleStats() const { return gasParticles_.stats(); }
+    void resetGasParticleStats() { gasParticles_.resetStats(); }
 
 private:
     struct Target {
@@ -65,15 +96,33 @@ private:
     void upscalePass(const FrameInput& in, const Target& src, Target& dst);
     void bloomPass(const FrameInput& in, const Target& src);
     void compositePass(const FrameInput& in, const Target& hdr, GLuint dstFbo, int w, int h);
+    void particlePass(const FrameInput& in, const Target& hdr);
     void updateAutoExposure(const FrameInput& in, const Target& hdr);
 
-    ShaderProgram traceProg_, accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
+    // Tracer variants: with/without body code and with/without gas code.
+    ShaderProgram traceProg_, traceBodiesProg_, traceGasProg_, traceGasBodiesProg_;
+    // Star-disruption gas: each volume is smoothed (separable 3D blur) into gasSmooth_[i][0].
+    ShaderProgram gasBlurProg_;
+    GLuint gasSmooth_[4][2] = {};
+    int gasSmoothRes_[4] = {};
+    int gasLive_[4] = {1, 1, 1, 1};   // volumes worth marching (peak optical depth per texel, read a frame late)
+    ShaderProgram gasPeakProg_;
+    GLuint gasPeakBuf_[2] = {0, 0};
+    GLuint gasOccBuf_ = 0;           // occupied 8^3 blocks per volume (see gas_peak.comp)
+    bool gasOccOk_ = false;
+    int gasPeakFrame_ = 0;
+    void smoothGas(const FrameInput& in);
+    GasParticleRenderer gasParticles_;
+    ShaderProgram accumProg_, upscaleProg_, bloomDownProg_, bloomUpProg_, compositeProg_;
+    ShaderProgram& traceFor(const FrameInput& in);
     Target trace_, accum_[2], upscaled_, lumaProbe_, captureOut_;
     static constexpr int kMaxBloomLevels = 8;
     Target bloom_[kMaxBloomLevels];
     int bloomLevels_ = 0;
     int accumPing_ = 0;
     GLuint vao_ = 0;
+    GLuint bodyBuffer_ = 0;
+    size_t bodyCapacity_ = 0;
 
     static constexpr int kQueryRing = 4;
     GLuint queries_[kQueryRing] = {};

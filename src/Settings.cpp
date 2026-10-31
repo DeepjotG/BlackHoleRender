@@ -57,8 +57,10 @@ template <class T>
 std::string toStr(const T& v) { return std::to_string(v); }
 std::string toStr(bool v) { return v ? "1" : "0"; }
 std::string toStr(float v) { char buf[64]; std::snprintf(buf, sizeof buf, "%.6g", v); return buf; }
+std::string toStr(double v) { char buf[64]; std::snprintf(buf, sizeof buf, "%.12g", v); return buf; }
 
 void fromStr(const std::string& s, float& v) { v = std::strtof(s.c_str(), nullptr); }
+void fromStr(const std::string& s, double& v) { v = std::strtod(s.c_str(), nullptr); }
 void fromStr(const std::string& s, int& v) { v = static_cast<int>(std::strtol(s.c_str(), nullptr, 10)); }
 void fromStr(const std::string& s, uint32_t& v) { v = static_cast<uint32_t>(std::strtoul(s.c_str(), nullptr, 10)); }
 void fromStr(const std::string& s, bool& v) { v = (s == "1" || s == "true"); }
@@ -85,6 +87,8 @@ const std::vector<Field>& fields() {
         BHS_FIELD(saturation), BHS_FIELD(sharpen),
         BHS_TRACE(fovDeg), BHS_FIELD(mouseSensitivity), BHS_FIELD(invertY),
         BHS_TRACE(showShadowOverlay), BHS_FIELD(showUi),
+        BHS_TRACE(universeMode), BHS_TRACE(universeSeed), BHS_TRACE(realPlacement), BHS_TRACE(bhMassSolar),
+        BHS_FIELD(timeWarp), BHS_TRACE(planetsEnabled), BHS_FIELD(showLabels), BHS_TRACE(gasBrightness), BHS_TRACE(gasOpacity), BHS_TRACE(deepSky),
     };
     return f;
 }
@@ -142,6 +146,13 @@ bool Settings::load(const std::string& path) {
         }
     }
     return true;
+}
+
+void Settings::revertUntouched(const Settings& loaded, const Settings& launched) {
+    for (const auto& f : fields()) {
+        const std::string at = f.get(launched);
+        if (f.get(*this) == at && at != f.get(loaded)) f.set(*this, f.get(loaded));
+    }
 }
 
 }  // namespace bhs

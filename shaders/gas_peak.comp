@@ -1,0 +1,32 @@
+#version 460 core
+// Largest visual weight of one texel of a star-disruption gas volume, accumulated into peaks[uSlot] as
+// fixed point (1e-4 units) with an atomic max. The renderer reads it a frame later and skips volumes
+// whose gas is too thin and cool to see.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+uniform sampler3D uSrc;
+uniform int uRes;
+uniform int uSlot;
+uniform float uRefLen;    // the renderer's reference length (M), the same for every volume
+layout(std430, binding = 6) buffer Peaks { uint peaks[]; };
+// Which 8x8x8-texel blocks hold gas (dilated by one texel, so filtering never reaches outside them):
+// the tracer steps through empty blocks in big strides.
+layout(std430, binding = 7) buffer Occupancy { uint occ[]; };   // 4 volumes x (res/8)^3 blocks
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(p, ivec3(uRes)))) return;
+    // Visual weight: optical depth, or for thin gas how brightly it glows (emission multiplier times a
+    // rough visible-brightness factor of its temperature), so thin but hot debris counts as visible.
+    vec4 g = texelFetch(uSrc, p, 0);
+    float tau = max(g.r, 0.0) * uRefLen;
+    float hot = clamp((g.g / 0.65) * (g.g / 0.65), 0.05, 20.0);
+    float v = max(tau, tau * max(g.b, 0.0) * hot);
+    if (v > 1e-4) atomicMax(peaks[uSlot], uint(min(v, 4.0e5) * 1e4));
+    if (g.r * uRefLen > 0.005) {   // visible gas only (the tracer skips thinner gas anyway)
+        int nb = uRes / 8;
+        ivec3 lo = clamp((p - 1) / 8, ivec3(0), ivec3(nb - 1)), hi = clamp((p + 1) / 8, ivec3(0), ivec3(nb - 1));
+        for (int z = lo.z; z <= hi.z; ++z)
+            for (int y = lo.y; y <= hi.y; ++y)
+                for (int x = lo.x; x <= hi.x; ++x) occ[uSlot * 512 + (z * nb + y) * nb + x] = 1u;
+    }
+}

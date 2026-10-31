@@ -14,8 +14,9 @@ uniform float uDiskPeakTemp;
 uniform float uDiskBrightness;
 uniform float uDiskNoiseScale;
 uniform float uDiskNoiseStrength;
-uniform float uDiskSpeed;
+uniform float uDiskTime;        // flow clock in M (CPU-side: real time x rotation speed x base rate, wrapped)
 uniform float uDiskWarmth;
+uniform float uDiskInflow;      // radial drift of the pattern per radian of orbit (log-radius noise units)
 
 // Film-style warm grade applied to the disk's blackbody colour.
 vec3 diskTint(vec3 c) { return c * mix(vec3(1.0), vec3(1.0, 0.80, 0.58), uDiskWarmth); }
@@ -44,8 +45,8 @@ float redshiftFactor(float r, float bAxis, float rcam) {
 // copies are cross-faded so differential rotation never shears the pattern indefinitely.
 float diskNoise(float r, float phi, float yOverH) {
     float omega = keplerOmega(r);
-    float t = uTime * uDiskSpeed;
-    const float P = 60.0;
+    float t = uDiskTime;
+    const float P = 60.0;   // must match kDiskClockPeriod in App.cpp
     float t1 = mod(t, P);
     float t2 = mod(t + 0.5 * P, P);
     float w2 = abs(2.0 * t1 / P - 1.0);
@@ -54,8 +55,9 @@ float diskNoise(float r, float phi, float yOverH) {
     float yy = yOverH * 0.35;
     // Disk angular momentum is along +y: gas at (r,0,0) moves toward -z, so phi = atan(z,x) decreases
     // with time. Must match the axis passed to impactParameterAboutAxis in blackhole.frag.
-    vec3 c1 = vec3((phi + omega * t1) * (rep / TWO_PI), lr, yy);
-    vec3 c2 = vec3((phi + omega * t2) * (rep / TWO_PI), lr + 0.37, yy + 0.61);
+    // With inflow the pattern also drifts inwards, faster closer in: gas spiralling into the hole.
+    vec3 c1 = vec3((phi + omega * t1) * (rep / TWO_PI), lr + uDiskInflow * omega * t1, yy);
+    vec3 c2 = vec3((phi + omega * t2) * (rep / TWO_PI), lr + 0.37 + uDiskInflow * omega * t2, yy + 0.61);
     float n1 = texture(uNoise3d, c1).r;
     float n2 = texture(uNoise3d, c2).r;
     return mix(n1, n2, w2);

@@ -7,3 +7,8 @@ build-*/
 settings.ini
 imgui.ini
 compile_commands.json
+
+# Derived from AAS-copyrighted tables (see assets/real/README.md): generated locally by
+# tools/fetch_real_catalogs.py, never distributed with the code.
+assets/real/galaxies.bin
+tools/__pycache__/

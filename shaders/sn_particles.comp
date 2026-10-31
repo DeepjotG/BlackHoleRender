@@ -1,0 +1,113 @@
+#version 460 core
+// Places the particles of a supernova (src/sn/SnEvent.cpp) for the gas splat renderer (gas_splat.comp,
+// law 1), relative to the star: while the envelope is opaque, the ragged fingers of its fastest ejecta
+// beyond the photosphere (itself a body); later the remnant: a shell of filaments and knots of the inner
+// ejecta lit by radioactive decay, in regions of hydrogen red, oxygen teal and sulphur orange, the forward
+// shock's faint blue rim round them, and the pulsar in its wind nebula at the centre. Everything expands
+// homologously: a particle's direction and its fraction of the current radius are fixed by its seed and
+// its noise is comoving, so the pattern grows with the ejecta instead of boiling.
+// Output: pPos (xyz relative to the centre, w = 0 active / 3 unused), pVel (xyz: the direction the kernel
+// is stretched along, by its length when above 1; w: kernel radius in M), pAux (x optical depth through
+// the splat's centre, y emission multiplier, z temperature / 1e4 K or, negative, an emission-line colour
+// (gas_splat.comp), w noise scale in M).
+layout(local_size_x = 256) in;
+#include "common.glsl"
+
+layout(std430, binding = 0) writeonly buffer PartPos { vec4 pPos[]; };
+layout(std430, binding = 1) writeonly buffer PartVel { vec4 pVel[]; };
+layout(std430, binding = 2) writeonly buffer PartAux { vec4 pAux[]; };
+
+uniform int uCountWisp, uCountFil, uCountShell, uCountPwn;
+uniform vec4 uWisp;            // envelope radius (M), tau per particle, emission, kernel radius (M)
+uniform float uWispTemp;       // the photosphere's temperature / 1e4 K
+uniform vec4 uNeb;             // nebula radius (M), tau per particle, emission, kernel radius (M)
+uniform vec4 uShell;           // forward shock radius (M), tau per particle, emission, kernel radius (M)
+uniform vec4 uPwn;             // wind nebula radius (M), tau per particle, emission, kernel radius (M)
+uniform float uFilThreshold;   // a filament particle exists where the ridge noise exceeds this
+uniform float uWispReach;     // 0..1: how far the fingers have grown (short at the breakout)
+
+vec3 sphereDir(vec2 r) {
+    float z = 2.0 * r.x - 1.0;
+    float ph = TWO_PI * r.y;
+    float s = sqrt(max(1.0 - z * z, 0.0));
+    return vec3(s * cos(ph), s * sin(ph), z);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    int total = uCountWisp + uCountFil + uCountShell + uCountPwn;
+    if (i >= total) return;
+    vec3 rnd = hash3u(uvec3(uint(i), 0x9E3779B9u, 0x7F4A7C15u));
+    vec3 rnd2 = hash3u(uvec3(uint(i), 0x85EBCA6Bu, 0xC2B2AE35u));
+    vec4 pos = vec4(0.0, 0.0, 0.0, 3.0), vel = vec4(0.0), aux = vec4(0.0);
+    if (i < uCountWisp) {
+        // Fingers of the fastest ejecta beyond the photosphere: clumped (a comoving noise on the sphere),
+        // reaching farthest where the clumps are strongest, each splat drawn out along its radius.
+        float R = uWisp.x;
+        if (R > 0.0 && uWisp.z > 0.0) {
+            vec3 d = sphereDir(rnd.xy);
+            float clump = fbm3(d * 3.2 + vec3(2.1), 3, 0.55, 51u);
+            if (clump > -0.1) {
+                float reach = (0.05 + 0.3 * smoothstep(-0.1, 0.45, clump)) * uWispReach;
+                float f = pow(rnd.z, 1.3);   // denser near the surface
+                pos = vec4(d * (R * (1.0 + reach * f)), 0.0);
+                vel = vec4(d * (1.0 + 1.8 * uWispReach * smoothstep(0.0, 0.5, clump)), uWisp.w);
+                float fade = 1.0 - 0.7 * f;   // thinner and cooler outward
+                aux = vec4(uWisp.y * fade, uWisp.z * fade * (0.7 + 0.6 * rnd2.x), uWispTemp * (0.88 + 0.08 * rnd2.y - 0.12 * f), 0.15 * R);
+            }
+        }
+    } else if (i < uCountWisp + uCountFil) {
+        // Filaments: the inner ejecta in a shell (0.72 to 1 of the nebula's radius, denser outward, so the
+        // remnant is limb-brightened), kept on the ridges of a comoving noise (sheets and fingers), with
+        // knots where a finer noise peaks. Neighbouring filaments share their element (a coarse noise picks
+        // the region), as in real remnants; the knots are drawn out radially (Rayleigh-Taylor fingers).
+        float R = uNeb.x;
+        if (R > 0.0 && uNeb.z > 0.0) {
+            vec3 d = sphereDir(rnd.xy);
+            float f = mix(0.72, 1.0, pow(rnd.z, 0.45));
+            vec3 q = d * f;   // comoving, in units of the radius
+            float ridge = 1.0 - abs(fbm3(q * 2.4 + vec3(1.7), 4, 0.55, 41u));
+            if (ridge > uFilThreshold) {
+                float knot = smoothstep(0.15, 0.55, fbm3(q * 7.5 + vec3(3.3), 2, 0.5, 43u));
+                float region = fbm3(q * 1.4 + vec3(8.8), 2, 0.5, 47u);
+                float line = region > 0.16 ? 2.0 : (region < -0.3 ? 4.0 : 1.0);
+                float strength = smoothstep(uFilThreshold, 1.0, ridge);
+                pos = vec4(q * R, 0.0);
+                vel = vec4(d * (1.0 + 1.4 * knot), uNeb.w);
+                aux = vec4(uNeb.y * (0.6 + 0.8 * strength), uNeb.z * (0.5 + strength + 1.5 * knot) * (0.8 + 0.4 * rnd2.x), -line, 0.1 * R);
+            }
+        }
+    } else if (i < uCountWisp + uCountFil + uCountShell) {
+        // The forward shock: a thin, faint, patchy blue rim at the outer ejecta's edge.
+        float R = uShell.x;
+        if (R > 0.0 && uShell.z > 0.0) {
+            vec3 d = sphereDir(rnd.xy);
+            float patchy = smoothstep(-0.15, 0.35, fbm3(d * 4.5 + vec3(4.4), 3, 0.5, 53u));
+            if (patchy > 0.02) {
+                pos = vec4(d * (R * (0.975 + 0.05 * rnd.z)), 0.0);
+                vel = vec4(0.0, 0.0, 0.0, uShell.w);
+                aux = vec4(uShell.y * patchy, uShell.z * patchy * (0.7 + 0.6 * rnd2.x), -3.0, 0.2 * R);
+            }
+        }
+    } else {
+        // The pulsar, a point of a few tight splats, in its wind nebula: a soft blue glow, brightest inside.
+        float R = uPwn.x;
+        if (R > 0.0 && uPwn.z > 0.0) {
+            int k = i - uCountWisp - uCountFil - uCountShell;
+            vec3 d = sphereDir(rnd.xy);
+            if (k < 48) {
+                pos = vec4(d * (0.01 * R * rnd.z), 0.0);
+                vel = vec4(0.0, 0.0, 0.0, 0.02 * R);
+                aux = vec4(uPwn.y * 4.0, uPwn.z * 6.0, 4.0, 0.05 * R);
+            } else {
+                float r = R * pow(rnd.z, 0.65);
+                pos = vec4(d * r, 0.0);
+                vel = vec4(0.0, 0.0, 0.0, uPwn.w);
+                aux = vec4(uPwn.y, uPwn.z * (1.0 - 0.6 * r / R) * (0.7 + 0.6 * rnd2.x), -3.0, 0.4 * R);
+            }
+        }
+    }
+    pPos[i] = pos;
+    pVel[i] = vel;
+    pAux[i] = aux;
+}

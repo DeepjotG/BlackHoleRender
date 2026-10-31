@@ -1,0 +1,207 @@
+#version 460 core
+// Star disruption: cloud-in-cell deposit of every active particle into grid 0 (if inside) and into the
+// finest black-hole nest level containing it, as integer fixed point (see tde_common.glsl), plus the
+// radial histogram around the predicted core position for the monopole self-gravity.
+//
+// Each workgroup first sums its deposits in a shared-memory hash table keyed by (grid, cell) and then
+// adds the table to global memory: a compact star or stream sends thousands of deposits to the same
+// few cells, which would otherwise serialise on global atomics. When the table has no free slot near
+// a key the deposit goes straight to global memory. Integer sums make the result independent of the
+// order of the additions.
+//
+// It also counts the particles bound to the core at any distance (mCore[27], which switches the
+// self-gravity) and, on the last step of a frame, the global cell updates it made (direct deposits and
+// flushed table slots, sWords[S_GWRITES]) for the cost model of TdeSim.cpp.
+#include "tde_common.glsl"
+
+layout(local_size_x = 256) in;
+
+const int HSLOTS = 512;
+const uint EMPTY = 0xFFFFFFFFu;
+shared uint hKey[HSLOTS];
+shared uint hMass[HSLOTS];
+shared uint hUsed;                // slots taken; past 3/4 the table is bypassed (incoherent particles)
+shared uint hDirect;              // cell updates that went straight to global memory
+shared uint hW[HSLOTS * 10];      // per slot: momentum x, y, z, energy, heat as (low, high) pairs
+shared uint shHist[NBINS + 1];
+shared vec4 shCx[256];            // per thread: offset / d_c (xyz), 1 if near the core (w)
+shared vec4 shCv[256];            // per thread: velocity relative to the predicted core velocity
+shared vec4 shM1[256];            // per thread: xx, yy, zz of the offset / (2 d_c), 1 if within 2 d_c
+shared vec4 shM2[256];            // per thread: xy, xz, yz, 1 if bound to the core (any distance)
+
+void sharedAddPair(int i, uvec2 p) {
+    if (p.x == 0u && p.y == 0u) return;
+    uint old = atomicAdd(hW[i], p.x);
+    uint hiAdd = p.y + ((old + p.x < old) ? 1u : 0u);
+    if (hiAdd != 0u) atomicAdd(hW[i + 1], hiAdd);
+}
+
+void depositCell(int g, int cell, uint m, uvec2 p0, uvec2 p1, uvec2 p2, uvec2 p3, uvec2 p4) {
+    uint key = (uint(g) << 18) | uint(cell);
+    uint h = (key * 2654435761u) >> 23;
+    // Grid 0 is fine enough that contention is low: straight to global memory, as are all deposits
+    // once the table is mostly full (the workgroup's particles are spread over many cells).
+    int probes = (g == 0 || hUsed > uint(3 * HSLOTS / 4)) ? 0 : 4;
+    for (int probe = 0; probe < probes; ++probe) {
+        uint s = (h + uint(probe)) & uint(HSLOTS - 1);
+        uint prev = atomicCompSwap(hKey[s], EMPTY, key);
+        if (prev == EMPTY) atomicAdd(hUsed, 1u);
+        if (prev == EMPTY || prev == key) {
+            if (m != 0u) atomicAdd(hMass[s], m);
+            int b = int(s) * 10;
+            sharedAddPair(b, p0);
+            sharedAddPair(b + 2, p1);
+            sharedAddPair(b + 4, p2);
+            sharedAddPair(b + 6, p3);
+            sharedAddPair(b + 8, p4);
+            return;
+        }
+    }
+    if (m != 0u) atomicAdd(gAcc[accIndex(g, W_MASS, cell)], m);
+    accAddPair(accIndex(g, W_MOM, cell), p0.x, p0.y);
+    accAddPair(accIndex(g, W_MOM + 2, cell), p1.x, p1.y);
+    accAddPair(accIndex(g, W_MOM + 4, cell), p2.x, p2.y);
+    accAddPair(accIndex(g, W_ENER, cell), p3.x, p3.y);
+    accAddPair(accIndex(g, W_HEAT, cell), p4.x, p4.y);
+    markTouched(g, cell);
+    atomicAdd(hDirect, 1u);
+}
+
+void depositCic(int g, vec3 s, vec3 v, float uS, float hS, bool heat) {
+    vec3 sm = s - 0.5;
+    ivec3 i0 = ivec3(floor(sm));
+    vec3 f = sm - vec3(i0);
+    for (int c = 0; c < 8; ++c) {
+        ivec3 o = ivec3(c & 1, (c >> 1) & 1, (c >> 2) & 1);
+        vec3 wv = mix(1.0 - f, f, vec3(o));
+        float w = wv.x * wv.y * wv.z;
+        float wm = w * MOM_SCALE;
+        depositCell(g, cellIndex(i0 + o), uint(w * uScale.x + 0.5), toPair(wm * v.x), toPair(wm * v.y), toPair(wm * v.z),
+                    toPair(w * uS), heat ? toPair(w * hS) : uvec2(0u));
+    }
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    for (int s = int(lid); s < HSLOTS; s += 256) {
+        hKey[s] = EMPTY;
+        hMass[s] = 0u;
+        for (int k = 0; k < 10; ++k) hW[s * 10 + k] = 0u;
+    }
+    for (uint b = lid; b <= uint(NBINS); b += 256u) shHist[b] = 0u;
+    if (lid == 0u) {
+        hUsed = 0u;
+        hDirect = 0u;
+    }
+    barrier();
+    vec4 cx = vec4(0.0), cv = vec4(0.0), m1 = vec4(0.0), m2 = vec4(0.0);
+
+    uint i = gl_GlobalInvocationID.x;
+    float state = i < uint(uInfo.x) ? pPos[i].w : 3.0;
+    if (state == 0.0 || (state == 4.0 && uFrozen.w > 0.5)) {
+        vec3 x = pPos[i].xyz;
+        vec3 v = clampSpeed(pVel[i].xyz);
+        if (state == 4.0) {
+            x += uFrozen.xyz;
+            v = clampSpeed(v + uFrozenVel.xyz);
+        }
+        vec4 aux = pAux[i];
+        float uS = clamp(aux.z, 0.0, 1.0) * uScale.y;
+        float hS = clamp(aux.y, 0.0, 1.0) * uScale.z;
+        bool heat = uStep.w > 0.5;
+        vec4 g0 = uGridDep[0];
+        bool inG0 = false;
+        if (g0.w > 0.0) {
+            vec3 s = gridCoord(g0, x);
+            inG0 = insideMargin(s, 0.5);
+            if (inG0) depositCic(0, s, v, uS, hS, heat);
+        }
+        // With uInfo.z = 1, grid 0 reaches the nest through tde_g0nest.comp instead.
+        for (int k = 1; k < NGRID && !(inG0 && uInfo.z == 1); ++k) {
+            vec4 geo = uGridDep[k];
+            if (geo.w <= 0.0) continue;
+            vec3 s = gridCoord(geo, x);
+            if (insideMargin(s, 0.5)) {
+                depositCic(k, s, v, uS, hS, heat);
+                break;
+            }
+        }
+        if (uMono.z > 0.5) {
+            vec3 dx = x - cTraj[TRAJ].xyz;
+            float d = length(dx);
+            float sb = sqrt(d / uMono.x) * float(NBINS);
+            uint b = sb >= float(NBINS) ? uint(NBINS) : uint(sb);
+            atomicAdd(shHist[b], 1u);
+            // Bound to the core: slower than the escape speed from the mass inside d (monopole table of
+            // the previous step). Summed at any distance it is the self-bound mass M_b, which tells
+            // TdeSim.cpp whether a self-gravitating core is left.
+            vec3 dv = v - cEndVel.xyz;
+            bool bound = boundToCore(dx, dv);
+            // Mean shift towards the centre of mass of the gas within d_c of the predicted position:
+            // an unbiased centre for the monopole (a biased one would push the whole star around).
+            if (d < 2.0 * uMono.w) {
+                vec3 e = dx / (2.0 * uMono.w);
+                m1 = vec4(e * e, 1.0);
+                m2.xyz = vec3(e.x * e.y, e.x * e.z, e.y * e.z);
+            }
+            m2.w = bound ? 1.0 : 0.0;
+            if (d < uMono.w) {
+                cx = vec4(dx / uMono.w, 1.0);
+                cv = vec4(clamp(dv, vec3(-0.1), vec3(0.1)), bound ? 1.0 : 0.0);
+            }
+        }
+    }
+    shCx[lid] = cx;
+    shCv[lid] = cv;
+    shM1[lid] = m1;
+    shM2[lid] = m2;
+    barrier();
+    // Tree reduction of the core sums (no contention, fixed summation order).
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) {
+            shCx[lid] += shCx[lid + stride];
+            shCv[lid] += shCv[lid + stride];
+            shM1[lid] += shM1[lid + stride];
+            shM2[lid] += shM2[lid + stride];
+        }
+        barrier();
+    }
+    for (int s = int(lid); s < HSLOTS; s += 256) {
+        uint key = hKey[s];
+        if (key == EMPTY) continue;
+        int g = int(key >> 18);
+        int cell = int(key & 0x3FFFFu);
+        if (hMass[s] != 0u) atomicAdd(gAcc[accIndex(g, W_MASS, cell)], hMass[s]);
+        for (int w = 0; w < 5; ++w) accAddPair(accIndex(g, W_MOM + 2 * w, cell), hW[s * 10 + 2 * w], hW[s * 10 + 2 * w + 1]);
+        markTouched(g, cell);
+    }
+    for (uint b = lid; b <= uint(NBINS); b += 256u)
+        if (shHist[b] != 0u) atomicAdd(mHist[b], shHist[b]);
+    if (lid == 0u && uStep.w > 0.5) {
+        uint writes = hDirect + min(hUsed, uint(HSLOTS));   // every slot taken is flushed once
+        if (writes != 0u) atomicAdd(sWords[S_GWRITES], writes);
+    }
+    if (lid == 0u && shM2[0].w > 0.5) atomicAdd(mCore[27], uint(shM2[0].w + 0.5));
+    if (lid == 0u && shM1[0].w > 0.5) {
+        atomicAdd(mCore[14], uint(shM1[0].w + 0.5));
+        float mom[6] = float[6](shM1[0].x, shM1[0].y, shM1[0].z, shM2[0].x, shM2[0].y, shM2[0].z);
+        for (int k = 0; k < 6; ++k) {
+            uvec2 p = toPair(mom[k] * CORE_XS);
+            uint old = atomicAdd(mCore[15 + 2 * k], p.x);
+            uint hiAdd = p.y + ((old + p.x < old) ? 1u : 0u);
+            if (hiAdd != 0u) atomicAdd(mCore[16 + 2 * k], hiAdd);
+        }
+    }
+    if (lid == 0u && shCx[0].w > 0.5) {
+        atomicAdd(mCore[0], uint(shCx[0].w + 0.5));
+        atomicAdd(mCore[13], uint(shCv[0].w + 0.5));
+        float sums[6] = float[6](shCx[0].x * CORE_XS, shCx[0].y * CORE_XS, shCx[0].z * CORE_XS,
+                                 shCv[0].x * CORE_VS, shCv[0].y * CORE_VS, shCv[0].z * CORE_VS);
+        for (int k = 0; k < 6; ++k) {
+            uvec2 p = toPair(sums[k]);
+            uint old = atomicAdd(mCore[2 * k + 1], p.x);
+            uint hiAdd = p.y + ((old + p.x < old) ? 1u : 0u);
+            if (hiAdd != 0u) atomicAdd(mCore[2 * k + 2], hiAdd);
+        }
+    }
+}

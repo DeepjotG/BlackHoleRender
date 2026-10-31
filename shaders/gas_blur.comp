@@ -1,0 +1,29 @@
+#version 460 core
+// One axis of a separable 5-tap blur ([1 4 6 4 1] / 16) of a star-disruption gas volume. The density
+// comes from particles deposited on a 64^3 grid with a few particles per cell, so raw volumes look
+// porous and sparkly; three passes (x, y, z) make smooth gas without changing its total.
+// Channels: r = absorption per M (blurred), g = temperature / 1e4 K and b = emission multiplier
+// (absorption-weighted means, so edges keep the gas's temperature instead of cooling toward empty
+// cells), a unused.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+uniform sampler3D uSrc;
+layout(rgba16f, binding = 0) writeonly uniform image3D uDst;
+uniform ivec3 uDir;
+uniform int uRes;
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(p, ivec3(uRes)))) return;
+    const float w[5] = float[](1.0, 4.0, 6.0, 4.0, 1.0);
+    float k = 0.0, kT = 0.0, kB = 0.0;
+    for (int i = -2; i <= 2; ++i) {
+        ivec3 q = p + uDir * i;
+        if (any(lessThan(q, ivec3(0))) || any(greaterThanEqual(q, ivec3(uRes)))) continue;
+        vec4 v = texelFetch(uSrc, q, 0);
+        float ki = w[i + 2] * max(v.r, 0.0);
+        k += ki;
+        kT += ki * v.g;
+        kB += ki * v.b;
+    }
+    imageStore(uDst, p, k > 0.0 ? vec4(k / 16.0, kT / k, kB / k, 0.0) : vec4(0.0));
+}
