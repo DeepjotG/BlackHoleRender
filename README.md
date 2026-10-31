@@ -157,8 +157,9 @@ it apart on the GPU: the star stretches into a long stream, half of the gas esca
 falls back, crashes into itself and forms a hot disk, and whatever crosses the horizon is eaten.
 The gas is rendered with the same lensing as everything else.
 
-* **Spawn star plays the selected scenario exactly**, including its black hole mass; changing the
-  star or the orbit by hand turns it into *Custom*, which keeps the current black hole.
+* **Spawn star plays the selected scenario exactly**, including its black hole mass (your own comes
+  back when the event is over); changing the star, the orbit or the mass by hand turns it into
+  *Custom*, which keeps the current black hole.
 * **Scenarios** pick a black hole mass, a star and an orbit, e.g. a Sun-like star around
   Sagittarius A* (torn apart close to the hole and strongly lensed) or a red supergiant around
   Gargantua. Whether a star is torn apart depends on its size and the hole's mass: Gargantua
@@ -223,8 +224,9 @@ disruption, about two minutes long.
   (AT2017gfo's colour evolution) and turn transparent over ten days, dispersing the gold and
   platinum they forged; then the event ends by itself.
 
-Scenarios set the black hole, the binary's distance from it and the jet's aim; *Custom* keeps the
-current hole. The stars are drawn as lensed bodies; the kilonova shell and the jets are particles
+Scenarios set the black hole (yours comes back once the event is over), the binary's distance from
+it and the jet's aim; *Custom* keeps the current hole. The stars are drawn as lensed bodies; the
+kilonova shell and the jets are particles
 drawn by the same lensed splat renderer as the disruption's gas (their own opacity, temperature and
 glow laws); the steady accretion disk is unaffected. Command line: `--grb N` plays scenario N from
 the start.
@@ -271,6 +273,9 @@ the start.
 --x11 | --wayland                force a window system (see "Which GPU renders" above)
 --gl-debug                       print OpenGL driver errors and warnings
 ```
+
+Options are for that launch only: a value they set is not saved at exit unless you changed it in
+the panel or pressed *Save settings*.
 
 ## Troubleshooting
 

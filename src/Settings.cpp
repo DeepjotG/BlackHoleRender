@@ -148,4 +148,11 @@ bool Settings::load(const std::string& path) {
     return true;
 }
 
+void Settings::revertUntouched(const Settings& loaded, const Settings& launched) {
+    for (const auto& f : fields()) {
+        const std::string at = f.get(launched);
+        if (f.get(*this) == at && at != f.get(loaded)) f.set(*this, f.get(loaded));
+    }
+}
+
 }  // namespace bhs

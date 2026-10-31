@@ -119,4 +119,8 @@ double BlackHoleSystem::rocheLimitM(const Planet& p, double bhMassSolar) {
     return planetRadiusM(p, bhMassSolar) * std::cbrt(2.0 * massRatio);
 }
 
+bool BlackHoleSystem::planetFitsOrbit(const Planet& p, double bhMassSolar) {
+    return planetRadiusM(p, bhMassSolar) < 0.25 * p.orbitRadiusM;
+}
+
 }  // namespace bhs

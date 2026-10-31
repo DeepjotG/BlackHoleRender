@@ -6,6 +6,7 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include <imgui_internal.h>   // ClosePopupsExceptModals
 
 #include <algorithm>
 #include <cmath>
@@ -100,6 +101,8 @@ void Ui::newFrame(bool mouseCaptured) {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+    // Esc on an open dropdown: close it here, inside the frame, as ImGui's own keyboard nav would (it is off).
+    if (closePopups_) { ImGui::ClosePopupsExceptModals(); closePopups_ = false; }
     // Drop widget keyboard focus so WantCaptureKeyboard cannot freeze flight controls.
     if (mouseCaptured) ImGui::SetWindowFocus(nullptr);
 }
@@ -114,6 +117,8 @@ void Ui::render() {
 bool Ui::wantsKeyboard() const { return inited_ && ImGui::GetIO().WantCaptureKeyboard; }
 bool Ui::wantsMouse() const { return inited_ && ImGui::GetIO().WantCaptureMouse; }
 bool Ui::anyItemActive() const { return inited_ && ImGui::IsAnyItemActive(); }
+// Safe between frames (onKey runs from glfwPollEvents): with AnyPopupId it only reads the open-popup stack.
+bool Ui::popupOpen() const { return inited_ && ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel); }
 
 namespace {
 bool sliderLog(const char* label, float* v, float lo, float hi, const char* fmt = "%.3f") {
@@ -125,6 +130,8 @@ void markCustom(Settings& s, bool changed) {
 bool sliderLogD(const char* label, double* v, double lo, double hi, const char* fmt) {
     return ImGui::SliderScalar(label, ImGuiDataType_Double, v, &lo, &hi, fmt, ImGuiSliderFlags_Logarithmic);
 }
+// The farthest planet orbit the panel offers (the camera's own reach in the painted backdrop is 20,000 M).
+constexpr double kOrbitMaxM = 5000.0;
 const char* lookName(universe::PlanetLook l) {
     switch (l) {
         case universe::PlanetLook::Rocky: return "rocky world";
@@ -327,6 +334,7 @@ void Ui::draw(UiContext& c) {
     if (ImGui::CollapsingHeader("Black hole & time", ImGuiTreeNodeFlags_DefaultOpen)) {
         const double mPerM = units::metersPerM(s.bhMassSolar);
         const double sPerM = units::secondsPerM(s.bhMassSolar);
+        const double massBefore = s.bhMassSolar;
         sliderLogD("Mass (suns)", &s.bhMassSolar, 3.0, 1e10, "%.3g");
         if (ImGui::SmallButton("Stellar (10)")) s.bhMassSolar = 10.0;
         ImGui::SameLine();
@@ -335,6 +343,13 @@ void Ui::draw(UiContext& c) {
         if (ImGui::SmallButton("Gargantua (100 M)")) s.bhMassSolar = 1e8;
         ImGui::SameLine();
         if (ImGui::SmallButton("M87* (6.5 B)")) s.bhMassSolar = 6.5e9;
+        // A black hole picked by hand is the user's own (nothing to give back after an event or the Real
+        // universe) and the one the events play around: their scenarios become "Custom".
+        if (s.bhMassSolar != massBefore) {
+            if (c.userMass) *c.userMass = 0.0;
+            if (c.tde) c.tde->scenario = kTdeScenarioCustom;
+            if (c.grb) c.grb->scenario = kGrbScenarioCustom;
+        }
         ImGui::TextDisabled("%s; horizon radius %s; 1 M = %s", units::formatMassSolar(s.bhMassSolar).c_str(),
                             units::formatDistance(2.0 * mPerM).c_str(), units::formatDistance(mPerM).c_str());
         sliderLogD("Time warp", &s.timeWarp, 0.01, 1e11, "%.3g x");
@@ -359,7 +374,7 @@ void Ui::draw(UiContext& c) {
         }
         if (diskOn && c.diskHidden)
             ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Hidden while the star disruption plays; it grows back from the debris later in the event (or press Clear).");
-        if (diskOn && s.paused) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the disk and the clock are stopped.");
+        if (s.paused) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the clock, the planets, the disk and any event are stopped.");
         if (s.universeMode == 2 && c.simJulianDate > 0.0) {
             const double unix = (c.simJulianDate - 2440587.5) * 86400.0;
             if (unix > -6.2e10 && unix < 2.5e11) {   // gmtime handles roughly years 0..9999
@@ -391,15 +406,25 @@ void Ui::draw(UiContext& c) {
             const double sPerM = units::secondsPerM(s.bhMassSolar);
             for (size_t i = 0; i < c.bhSystem->planets.size(); ++i) {
                 Planet& p = c.bhSystem->planets[i];
+                const bool drawn = BlackHoleSystem::planetFitsOrbit(p, s.bhMassSolar);   // else App::buildBodies skips it
                 ImGui::PushID(static_cast<int>(i));
                 ImGui::Separator();
                 ImGui::Text("%s, %s", p.name.c_str(), lookName(p.look));
                 ImGui::SameLine();
+                ImGui::BeginDisabled(!drawn);
                 if (ImGui::SmallButton("Go")) *c.goToRequest = p.name;
                 ImGui::SameLine();
                 const bool riding = c.followName && *c.followName == p.name;
-                if (ImGui::SmallButton(riding ? "Stop riding" : "Ride along")) *c.followName = riding ? std::string() : p.name;
-                sliderLogD("Orbit radius (M)", &p.orbitRadiusM, 3.05, 5000.0, "%.4g");
+                if (ImGui::SmallButton(riding ? "Stop riding" : "Ride along")) {
+                    if (riding) {
+                        *c.followLeft = p.name;   // else the auto-ride would hop straight back on
+                        c.followName->clear();
+                    } else {
+                        *c.rideRequest = p.name;   // the app starts the ride (from far away, it flies there first)
+                    }
+                }
+                ImGui::EndDisabled();
+                sliderLogD("Orbit radius (M)", &p.orbitRadiusM, 3.05, kOrbitMaxM, "%.4g");
                 const double tiltMin = -90.0, tiltMax = 90.0;
                 ImGui::SliderScalar("Tilt (deg)", ImGuiDataType_Double, &p.inclinationDeg, &tiltMin, &tiltMax, "%.1f");
                 const double period = BlackHoleSystem::orbitalPeriodM(p.orbitRadiusM) * sPerM;
@@ -413,11 +438,22 @@ void Ui::draw(UiContext& c) {
                 const double roche = BlackHoleSystem::rocheLimitM(p, s.bhMassSolar);
                 if (p.orbitRadiusM < roche) {
                     // A physics note (lighter black holes have stronger tides at a given radius in M),
-                    // not an error: the planet is still drawn; one click moves it to a safe orbit.
-                    ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Note: at this black hole mass, tides would tear it apart here.");
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Move it out")) p.orbitRadiusM = roche * 1.15;
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Moves the orbit to %.3g M, just outside the tidal limit (%.3g M).", roche * 1.15, roche);
+                    // not an error: the planet is still drawn; one click moves it to a safe orbit. Round a
+                    // light hole the planet would dwarf its orbit (Miller's radius is 540 M at 10 suns): then
+                    // it is not drawn (App::buildBodies), and its safe orbit can lie beyond the slider and the
+                    // camera's reach, so the button is only offered inside the slider's range.
+                    if (drawn)
+                        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Note: at this black hole mass, tides would tear it apart here.");
+                    else
+                        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Not drawn: at this black hole mass it would be %.3g M across, too big for its orbit.",
+                                           2.0 * BlackHoleSystem::planetRadiusM(p, s.bhMassSolar));
+                    if (roche * 1.15 <= kOrbitMaxM) {
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Move it out")) p.orbitRadiusM = roche * 1.15;
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Moves the orbit to %.3g M, just outside the tidal limit (%.3g M).", roche * 1.15, roche);
+                    } else {
+                        ImGui::TextDisabled("A safe orbit would be %.3g M out, beyond the orbit slider's %.0f M.", roche * 1.15, kOrbitMaxM);
+                    }
                 }
                 ImGui::PopID();
             }
@@ -432,12 +468,13 @@ void Ui::draw(UiContext& c) {
         if (!t.moduleAvailable)
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "The simulation module is not in this build yet.");
         // A scenario is a complete event (black hole mass, star, orbit): "Spawn star" plays exactly what is
-        // selected. Editing the star or the orbit below turns it into "Custom", which uses the current mass.
+        // selected, and the black hole from before comes back when the event is over. Editing the star or the
+        // orbit below, or the mass, turns it into "Custom", which uses the current mass.
         const char* scen[kTdeScenarioCount + 1];
         for (int i = 0; i < kTdeScenarioCount; ++i) scen[i] = kTdeScenarios[i].name;
         scen[kTdeScenarioCustom] = "Custom (the star and orbit below, this black hole)";
         if (ImGui::Combo("Scenario", &t.scenario, scen, kTdeScenarioCount + 1) && t.scenario < kTdeScenarioCount)
-            s.bhMassSolar = t.applyScenario(t.scenario);
+            (void)t.applyScenario(t.scenario);   // its black hole is switched to at Spawn, not now
         const double before[6] = {t.massSolar, t.radiusSolar, t.teff, t.beta, t.inclinationDeg, t.retrograde ? 1.0 : 0.0};
         const char* stars[kStarPresetCount];
         for (int i = 0; i < kStarPresetCount; ++i) stars[i] = kStarPresets[i].name;
@@ -463,16 +500,30 @@ void Ui::draw(UiContext& c) {
         const double rt = rStar * std::cbrt(bhMass / t.massSolar);
         const double rp = rt / t.beta;
         ImGui::TextDisabled("black hole %s: tidal radius %.4g M, closest approach %.4g M", units::formatMassSolar(bhMass).c_str(), rt, rp);
-        if (rp < 4.0) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Too compact for these tides: it will be swallowed whole.");
+        // Swallowed whole means a closest approach inside the 4 M capture radius. If the tides would have torn
+        // the star apart farther out (r_t >= 4 M) the orbit is simply too deep, and a shallower pass (beta at
+        // most r_t / 4, printed rounded down so the shown value is safe) disrupts it; only when r_t itself is
+        // inside 4 M is the star too compact for this black hole (lighter holes have stronger tides in M).
+        if (rp < 4.0 && rt >= 4.0)
+            ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Dives too deep: it will be swallowed whole (Penetration below %.2f tears it apart).",
+                               std::floor(rt / 4.0 * 100.0) / 100.0);
+        else if (rp < 4.0)
+            ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Too compact for these tides: it will be swallowed whole (try a bigger star or a lighter black hole).");
         else if (t.beta < 0.6) ImGui::TextDisabled("A grazing pass: the star loses some gas but survives.");
         else ImGui::TextDisabled("The tides will tear it apart.");
+        if (bhMass != s.bhMassSolar) ImGui::TextDisabled("Spawn switches to that black hole for the event; the current one comes back when it is over (Clear).");
         ImGui::BeginDisabled(!t.moduleAvailable);
         if (ImGui::Button("Spawn star")) t.spawnRequested = true;
         ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Clear")) t.clearRequested = true;
         ImGui::SameLine();
+        // Nothing to watch without an event: the director's camera only exists while one plays.
+        ImGui::BeginDisabled(!c.tdeActive);
         if (ImGui::Button("Watch")) t.watchRequested = true;
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(c.tdeActive ? "Hands the camera back to the event." : "Spawn a star first: there is nothing to watch yet.");
         ImGui::SameLine();
         ImGui::Checkbox("Auto time warp", &t.autoWarp);
         ImGui::SameLine();
@@ -482,13 +533,22 @@ void Ui::draw(UiContext& c) {
             const double sPerM = units::secondsPerM(s.bhMassSolar);
             if (c.tdeTitle && *c.tdeTitle) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.tdeTitle);
             if (c.tdeCaption && *c.tdeCaption) ImGui::TextWrapped("%s", c.tdeCaption);
-            ImGui::Text("%s after spawn   event clock: 1 s = %s", units::formatDuration(st.timeM * sPerM).c_str(),
-                        units::formatDuration(c.tdeWarp).c_str());
+            const std::string clockText = s.paused ? std::string("paused") : "1 s = " + units::formatDuration(c.tdeWarp);
+            ImGui::Text("%s after spawn   event clock: %s", units::formatDuration(st.timeM * sPerM).c_str(), clockText.c_str());
+            // The clock is what the director asks for; TdeSim::step advances less when over its GPU budget.
+            if (st.limited) ImGui::TextDisabled("The simulation cannot keep up with this clock (GPU cost cap): the event runs slower than shown.");
             ImGui::Text("bound %.0f%%   eaten %.1f%%   escaping %.0f%%   particles %d", 100.0 * st.boundFraction,
                         100.0 * st.accretedFraction, 100.0 * st.escapedFraction, st.activeParticles);
             ImGui::ProgressBar(static_cast<float>(std::min(1.0, st.dissipationRel)), ImVec2(-1.0f, 0.0f), "collision heating");
             if (c.diskHidden) ImGui::TextDisabled("The steady disk is hidden during the event; it grows back as the debris settles (Clear ends the event).");
-            ImGui::TextDisabled("The planets keep your own time warp; only the event runs faster.");
+            // Say here, where the user is looking, when the event is frozen with the rest of the simulation (P or
+            // the pause checkbox) or crawls at the world warp because its own clock is off.
+            if (s.paused)
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the star and its debris are frozen. Press P to continue.");
+            else if (!t.autoWarp)
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Auto time warp is off: the event runs at your time warp, without its slow motion and time-lapse, and can look stuck. Tick it to pace it.");
+            else
+                ImGui::TextDisabled("The event runs on its own clock; the planets keep your time warp.");
         }
         sliderLog("Gas brightness", &s.gasBrightness, 0.5f, 200.0f);
         sliderLog("Gas opacity", &s.gasOpacity, 0.05f, 20.0f);
@@ -502,7 +562,7 @@ void Ui::draw(UiContext& c) {
         for (int i = 0; i < kGrbScenarioCount; ++i) scen[i] = kGrbScenarios[i].name;
         scen[kGrbScenarioCustom] = "Custom (the orbit below, this black hole)";
         if (ImGui::Combo("Scenario##grb", &g.scenario, scen, kGrbScenarioCount + 1) && g.scenario < kGrbScenarioCount)
-            s.bhMassSolar = g.applyScenario(g.scenario);
+            (void)g.applyScenario(g.scenario);   // its black hole is switched to at Spawn, not now
         const double before[2] = {g.siteRadiusM, g.jetTiltDeg};
         sliderLogD("Distance from the hole (M)##grb", &g.siteRadiusM, 4.0, 2000.0, "%.0f");
         const double tiltMin = 0.0, tiltMax = 90.0;
@@ -510,13 +570,20 @@ void Ui::draw(UiContext& c) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 aims one jet straight at the black hole (it falls in); a few degrees off, it is bent past it.");
         if (g.siteRadiusM != before[0] || g.jetTiltDeg != before[1]) g.scenario = kGrbScenarioCustom;
         ImGui::TextDisabled("Two 1.4-solar-mass neutron stars, 120 km apart, circling the black hole. The whole event is about a minute and a half.");
+        if (g.scenario < kGrbScenarioCount && kGrbScenarios[g.scenario].bhMassSolar != s.bhMassSolar)
+            ImGui::TextDisabled("Spawn switches to a %s black hole for the event; the current one comes back when it is over (Clear).",
+                                units::formatMassSolar(kGrbScenarios[g.scenario].bhMassSolar).c_str());
         ImGui::BeginDisabled(!g.moduleAvailable);
         if (ImGui::Button("Spawn binary")) g.spawnRequested = true;
         ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Clear##grb")) g.clearRequested = true;
         ImGui::SameLine();
+        ImGui::BeginDisabled(!c.grbActive);
         if (ImGui::Button("Watch##grb")) g.watchRequested = true;
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(c.grbActive ? "Hands the camera back to the event." : "Spawn a binary first: there is nothing to watch yet.");
         ImGui::SameLine();
         ImGui::Checkbox("Auto time warp##grb", &g.autoWarp);
         if (c.grbActive && c.grbState && c.grbModel) {
@@ -524,14 +591,18 @@ void Ui::draw(UiContext& c) {
             const double sPerM = c.grbModel->secondsPerM(), mPerM = c.grbModel->metersPerM();
             if (c.eventTitle && *c.eventTitle) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.eventTitle);
             if (c.eventCaption && *c.eventCaption) ImGui::TextWrapped("%s", c.eventCaption);
+            const std::string clockText = s.paused ? std::string("paused") : "1 s = " + units::formatDuration(c.grbWarp);
             if (!st.merged)
-                ImGui::Text("%.1f km apart, one orbit every %.2f ms, merging in %s   event clock: 1 s = %s", st.separationM * mPerM * 1e-3,
-                            st.periodM * sPerM * 1e3, units::formatDuration((c.grbModel->mergeTimeM() - st.timeM) * sPerM).c_str(),
-                            units::formatDuration(c.grbWarp).c_str());
+                ImGui::Text("%.1f km apart, one orbit every %.2f ms, merging in %s   event clock: %s", st.separationM * mPerM * 1e-3,
+                            st.periodM * sPerM * 1e3, units::formatDuration((c.grbModel->mergeTimeM() - st.timeM) * sPerM).c_str(), clockText.c_str());
             else
-                ImGui::Text("%s after the merger   kilonova %s across at %.0f K   jets %s long   event clock: 1 s = %s",
+                ImGui::Text("%s after the merger   kilonova %s across at %.0f K   jets %s long   event clock: %s",
                             units::formatDuration(st.tauM * sPerM).c_str(), units::formatDistance(2.0 * st.knRadiusM * mPerM).c_str(), st.knTempK,
-                            units::formatDistance(std::max(st.jetHeadM[0], st.jetHeadM[1]) * mPerM).c_str(), units::formatDuration(c.grbWarp).c_str());
+                            units::formatDistance(std::max(st.jetHeadM[0], st.jetHeadM[1]) * mPerM).c_str(), clockText.c_str());
+            if (s.paused)
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Paused (P): the merger is frozen. Press P to continue.");
+            else if (!g.autoWarp)
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "Auto time warp is off: the event runs at your time warp, without its slow motion and time-lapse. Tick it to pace it.");
         }
     }
 
@@ -574,7 +645,10 @@ void Ui::draw(UiContext& c) {
         if (c.followName && !c.followName->empty()) {
             ImGui::Text("Riding along with %s", c.followName->c_str());
             ImGui::SameLine();
-            if (ImGui::SmallButton("Stop")) c.followName->clear();
+            if (ImGui::SmallButton("Stop")) {
+                *c.followLeft = *c.followName;   // else the auto-ride would hop straight back on
+                c.followName->clear();
+            }
         }
         if (c.turbo) ImGui::Checkbox("Turbo, 1000x (T)", c.turbo);
         ImGui::TextDisabled("Speed follows the distance to the nearest surface; scroll to change it, Shift = 5x.");
@@ -594,10 +668,12 @@ void Ui::draw(UiContext& c) {
         markCustom(s, ImGui::Combo("Disk mode", &s.diskMode, dm, 3));
         const char* res[] = {"1024", "2048", "4096"};
         int ri = s.skyResolution >= 4096 ? 2 : (s.skyResolution >= 2048 ? 1 : 0);
+        ImGui::BeginDisabled(c.universeActive);   // the painted backdrop's cubemap; a 3D universe bakes its own sky
         if (ImGui::Combo("Sky resolution", &ri, res, 3)) {
             s.skyResolution = ri == 2 ? 4096 : (ri == 1 ? 2048 : 1024);
             s.preset = PRESET_CUSTOM;
         }
+        ImGui::EndDisabled();
         ImGui::Checkbox("Dynamic resolution", &s.dynamicResolution);
         if (s.dynamicResolution) ImGui::SliderFloat("Target ms", &s.targetFrameMs, 8.0f, 50.0f, "%.1f");
         ImGui::Checkbox("Accumulate when still", &s.accumulate);
@@ -630,11 +706,15 @@ void Ui::draw(UiContext& c) {
         ImGui::SliderFloat("Rotation speed", &s.diskSpeed, 0.0f, 10.0f, "%.2f");
         if (s.diskSpeed > 0.0f) ImGui::TextDisabled("inner edge goes round every %.1f s", 2.0 * 3.14159265 * std::pow(6.0, 1.5) / (kDiskFlowRate * s.diskSpeed));
         ImGui::SliderFloat("Warm tint", &s.diskWarmth, 0.0f, 1.0f, "%.2f");
-        ImGui::Checkbox("Pause disk (P)", &s.paused);
+        ImGui::Checkbox("Pause everything (P)", &s.paused);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stops the clock, the planets, the disk and any event. To stop only the disk, set Rotation speed to 0.");
     }
 
     // ---- sky ----
     if (ImGui::CollapsingHeader("Sky")) {
+        // A 3D universe draws its own sky (Universe > Deep-sky exposure); only Star brightness reaches it.
+        if (c.universeActive) ImGui::TextDisabled("Painted backdrop only. The 3D universe draws its own sky: see Universe > Deep-sky exposure.");
+        ImGui::BeginDisabled(c.universeActive);
         int seed = static_cast<int>(s.skySeed);
         if (ImGui::InputInt("Seed", &seed)) s.skySeed = static_cast<uint32_t>(std::max(0, seed));
         ImGui::SameLine();
@@ -649,6 +729,7 @@ void Ui::draw(UiContext& c) {
         sliderLog("Milky Way", &s.milkyWayBrightness, 0.0f + 0.01f, 10.0f);
         sliderLog("Nebulae", &s.nebulaBrightness, 0.01f, 10.0f);
         ImGui::SliderFloat("Star density", &s.starDensity, 0.0f, 2.5f, "%.2f");
+        ImGui::EndDisabled();
         sliderLog("Star brightness", &s.starBrightness, 0.05f, 10.0f);
     }
 

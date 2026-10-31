@@ -53,6 +53,10 @@ public:
     // Distance (M) inside which the black hole's tides would pull a planet apart (rigid-body Roche limit).
     static double rocheLimitM(const Planet& p, double bhMassSolar);
     static double planetRadiusM(const Planet& p, double bhMassSolar);
+    // Whether the planet is small next to its orbit (radius under a quarter of it). Round a light hole
+    // it is not: at 10 suns Miller's radius is 540 M against a 6.5 M orbit, a sphere wrapped round the
+    // hole; such a planet is neither drawn nor solid (App::buildBodies).
+    static bool planetFitsOrbit(const Planet& p, double bhMassSolar);
 };
 
 }  // namespace bhs

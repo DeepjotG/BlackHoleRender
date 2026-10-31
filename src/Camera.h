@@ -66,9 +66,11 @@ public:
     double maxRadius = 20000.0;    // camera cannot go farther from the hole than this (M)
     static constexpr double kMinRadius = 2.3;
 
-    // Whether the pose changed since the previous update (used to reset accumulation).
+    // Whether the pose changed since the flag was last cleared. The app reads it once per frame to reset
+    // accumulation and then clears it (update() only adds to it, so a pose set before the update counts too).
     bool movedThisFrame() const { return moved_; }
     void markMoved() { moved_ = true; }
+    void clearMoved() { moved_ = false; }
 
     static const std::array<Bookmark, 4>& defaultBookmarks();
 

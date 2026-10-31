@@ -8,6 +8,8 @@
 #include <string>
 #include <thread>
 
+#include "Log.h"
+
 namespace bhs {
 
 class CatalogFetch {
@@ -37,10 +39,13 @@ public:
                 std::string l(buf);
                 while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
                 if (l.empty()) continue;
+                logInfo("catalogue download: {}", l);   // the terminal gets every line, the panel the last one
                 std::lock_guard<std::mutex> lock(s->m);
-                s->line = l.size() > 120 ? l.substr(0, 117) + "..." : l;
+                // A long line is cut from the left: the script's failure lines end with the reason.
+                s->line = l.size() > 120 ? "..." + l.substr(l.size() - 117) : l;
             }
             const int rc = pclose(f);
+            if (rc != 0) logWarn("galaxy catalogue download failed (see the lines above)");
             s->state = rc == 0 ? Done : Failed;
         }).detach();
     }

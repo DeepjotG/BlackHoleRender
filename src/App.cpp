@@ -229,6 +229,7 @@ int App::run(const Options& opt) {
     }
     const bool loaded = settings_.load(opt_.settingsPath);
     if (loaded) logInfo("loaded settings from {}", opt_.settingsPath);
+    onDisk_ = settings_;
     const bool automated = opt.frames > 0 || opt.benchmark;
     automated_ = automated;
     if (automated) {
@@ -237,6 +238,13 @@ int App::run(const Options& opt) {
         settings_.vsync = false;
         settings_.showUi = opt.forceUi;
         settings_.dynamicResolution = false;
+    }
+    // The saved mass belongs to the saved universe, so rebuilding that one at startup is not a new black
+    // hole and keeps the user's mass; a universe or placement given on the command line is a new one.
+    if (loaded && !automated) {
+        uniModeApplied_ = settings_.universeMode;
+        uniPlacementApplied_ = settings_.realPlacement;
+        uniReload_ = true;
     }
     if (opt.preset >= 0) settings_.applyPreset(opt.preset);
     if (opt.seed) settings_.skySeed = opt.seed;
@@ -247,7 +255,6 @@ int App::run(const Options& opt) {
     if (opt.diskMode >= 0) settings_.diskMode = opt.diskMode;
     if (opt.doppler >= 0.0f) settings_.dopplerStrength = opt.doppler;
     if (opt.exposure > 0.0f) settings_.exposure = opt.exposure;
-    if (opt.mass > 0.0) settings_.bhMassSolar = opt.mass;
     if (opt.warp >= 0.0) settings_.timeWarp = opt.warp;
     if (opt.universe >= 0) settings_.universeMode = opt.universe;
     if (opt.universeSeed >= 0) settings_.universeSeed = static_cast<uint32_t>(opt.universeSeed);
@@ -260,9 +267,12 @@ int App::run(const Options& opt) {
     if (!initWindow()) return 1;
     // First interactive run without the NVIDIA driver: start on Medium so it stays smooth. The
     // choice is persisted, so this never overrides a saved preset or --preset.
-    if (!isNvidia_ && !loaded && !automated && opt.preset < 0) {
-        settings_.applyPreset(PRESET_MEDIUM);
-        logWarn("non-NVIDIA GPU and no settings file: starting on the Medium preset (Quality panel to change)");
+    if (!isNvidia_ && !loaded && !automated) {
+        onDisk_.applyPreset(PRESET_MEDIUM);   // the persisted first-run choice, not a flag's value: saved at exit
+        if (opt.preset < 0) {
+            settings_.applyPreset(PRESET_MEDIUM);
+            logWarn("non-NVIDIA GPU and no settings file: starting on the Medium preset (Quality panel to change)");
+        }
     }
     if (!ui_.init(window_)) {
         logError("ImGui init failed");
@@ -276,10 +286,11 @@ int App::run(const Options& opt) {
     grbCtl_.moduleAvailable = grb_.init();
     if (!universe_.init()) logWarn("3D universe shaders failed to compile; only the painted backdrop is available");
     applyUniverseSettings();
+    if (opt.mass > 0.0) settings_.bhMassSolar = opt.mass;   // after the real placement's own mass, so --mass wins
     if (!tdeCtl_.moduleAvailable) logInfo("star-disruption simulation not available in this build");
     if (opt.tdeScenario >= 1 && opt.tdeScenario <= kTdeScenarioCount) {
         if (tdeCtl_.moduleAvailable) {
-            settings_.bhMassSolar = tdeCtl_.applyScenario(opt.tdeScenario - 1);
+            (void)tdeCtl_.applyScenario(opt.tdeScenario - 1);   // its black hole is switched to at the spawn
             tdeCtl_.spawnRequested = true;
         } else {
             logWarn("--tde ignored: the star-disruption simulation is not in this build");
@@ -287,12 +298,15 @@ int App::run(const Options& opt) {
     }
     if (opt.grbScenario >= 1 && opt.grbScenario <= kGrbScenarioCount) {
         if (grbCtl_.moduleAvailable) {
-            settings_.bhMassSolar = grbCtl_.applyScenario(opt.grbScenario - 1);
+            (void)grbCtl_.applyScenario(opt.grbScenario - 1);   // its black hole is switched to at the spawn
             grbCtl_.spawnRequested = true;
         } else {
             logWarn("--grb ignored: the merger's particle shader is not available");
         }
     }
+    // What the launch set (the flags, a scenario's black hole) is for this launch only: at exit, a field
+    // still at this value goes back to the file's, unless the user changed it or pressed Save settings.
+    launched_ = settings_;
     fixedDt_ = opt.fixedDt;
 
     const auto& bms = Camera::defaultBookmarks();
@@ -320,7 +334,10 @@ int App::run(const Options& opt) {
             frame();
             if (opt.frames > 0 && frameIndex_ >= opt.frames) break;
         }
-        if (!automated) saveSettings();
+        if (!automated) {
+            settings_.revertUntouched(onDisk_, launched_);   // the launch flags were for this launch
+            saveSettings();
+        }
     }
     shutdown();
     return rc;
@@ -355,6 +372,7 @@ void App::onKey(int key, int action, int) {
         case GLFW_KEY_ESCAPE:
             if (ui_.wantsKeyboard()) break;               // a text field is active: ImGui cancels the edit
             if (mouseCaptured_) setMouseCaptured(false);  // first Esc releases the mouse
+            else if (ui_.popupOpen()) ui_.requestClosePopups();   // an open dropdown closes instead of the app
             else quit_ = true;                            // Esc with the mouse already free quits
             break;
         case GLFW_KEY_TAB: setMouseCaptured(!mouseCaptured_); break;
@@ -442,8 +460,9 @@ void App::frame() {
         renderer_.reloadShaders();
     }
     // ImGui sliders change the value on every frame of a drag and each bake is a synchronous
-    // 1-4 s compute job, so wait until the widget is released and the value has settled.
-    const bool skyDirty = sky_.needsRebake(settings_);
+    // 1-4 s compute job, so wait until the widget is released and the value has settled. A 3D
+    // universe draws its own sky, so the painted one is left alone until the backdrop is back.
+    const bool skyDirty = !universe_.active() && sky_.needsRebake(settings_);
     skyDirtyFor_ = skyDirty ? skyDirtyFor_ + dt : 0.0;
     if (requestRebake_ || (skyDirty && skyDirtyFor_ > 0.3 && !ui_.anyItemActive())) {
         requestRebake_ = false;
@@ -454,6 +473,7 @@ void App::frame() {
     if (requestSave_) {
         requestSave_ = false;
         saveSettings();
+        launched_ = onDisk_ = settings_;   // saved on purpose, flags included: nothing to revert at exit
     }
     if (settings_.vsync != vsyncApplied_) {
         vsyncApplied_ = settings_.vsync;
@@ -529,7 +549,11 @@ void App::frame() {
     fi.skyCubemap = sky_.cubemap();
     fi.noise3d = diskTex_.noise3d();
     fi.blackbodyLut = diskTex_.blackbodyLut();
-    fi.resetAccumulation = camera_.movedThisFrame() || settingsChanged;
+    // An event moves traced content every frame (the star on its way in, the merger's stars and remnant, the
+    // steady disk fading, the debris disk forming), so a parked camera must not average frames while one plays.
+    const bool eventPlaying = !settings_.paused && (tde_.active() || grb_.active());
+    fi.resetAccumulation = camera_.movedThisFrame() || settingsChanged || eventPlaying;
+    camera_.clearMoved();   // the flag means "since last read": cleared now so the next frame starts clean
     fi.diskAnimating = !settings_.paused && settings_.diskSpeed > 0.0f && settings_.diskMode != DISK_NONE;
     // A real disruption happens around a quiet black hole and builds its own disk from the debris: the
     // steady disk fades out (over about two seconds) while an event plays, the debris disk fades in as the
@@ -621,10 +645,13 @@ void App::frame() {
         ctx.bodies = &bodies_;
         ctx.simSeconds = simSeconds_;
         ctx.followName = &followName_;
+        ctx.followLeft = &followLeft_;
         ctx.goToRequest = &goToRequest_;
+        ctx.rideRequest = &rideRequest_;
         ctx.nearestName = nearestName_.c_str();
         ctx.nearestDist = nearestDist_;
         ctx.turbo = &turbo_;
+        ctx.userMass = &userMass_;
         ctx.tde = &tdeCtl_;
         ctx.tdeStats = &tde_.stats();
         ctx.tdeActive = tde_.active();
@@ -651,6 +678,7 @@ void App::frame() {
         ctx.universeStatus = universe_.status().c_str();
         ctx.universeError = universeError_.c_str();
         ctx.galaxiesMissing = settings_.universeMode == 2 && universe_.active() && universe_.content().galaxies.empty();
+        ctx.universeActive = universe_.active();
         ctx.fetchState = static_cast<int>(catalogFetch_.state());
         fetchLine_ = catalogFetch_.lastLine();
         ctx.fetchLine = fetchLine_.c_str();
@@ -797,6 +825,9 @@ void App::buildBodies() {
     const double sPerM = units::secondsPerM(mass);
     if (settings_.planetsEnabled) {
         for (const Planet& p : bhSystem_.planets) {
+            // A planet that would dwarf its orbit (a stellar-mass hole) is neither drawn nor solid: its sphere
+            // would hide the hole and shove the camera about. The panel says so and offers a safe orbit.
+            if (!BlackHoleSystem::planetFitsOrbit(p, mass)) continue;
             BodyDesc b;
             b.name = p.name;
             b.kind = BodyKind::Planet;
@@ -841,25 +872,56 @@ void App::buildBodies() {
 }
 
 void App::saveSettings() {
-    // settings_.timeWarp is always the user's own warp (a star disruption runs on its own clock).
-    settings_.save(opt_.settingsPath);
+    // settings_.timeWarp is always the user's own warp (a star disruption runs on its own clock). The black
+    // hole may be an event's or the Real universe's own for now; the next session starts from the user's.
+    Settings out = settings_;
+    if (userMass_ > 0.0) out.bhMassSolar = userMass_;
+    out.save(opt_.settingsPath);
 }
+
+// An event's scenario (or the Real universe's placement) brings its own black hole along. Once it is over,
+// the Real universe's comes back while that is on (the user's own on leaving it), else the user's own.
+void App::restoreUserMass() {
+    if (userMass_ <= 0.0 || tde_.active() || grb_.active()) return;
+    const double realMass = universe_.active() ? universe_.content().suggestedMassSolar : 0.0;
+    settings_.bhMassSolar = realMass > 0.0 ? realMass : userMass_;
+    if (realMass <= 0.0) userMass_ = 0.0;
+}
+
+namespace {
+// Modification time of the real galaxy catalogue (file_time_type::min() when there is none). The Real
+// universe is rebuilt when it changes, so a catalogue built by hand while the app runs is picked up.
+std::filesystem::file_time_type galaxiesStamp(const std::string& appRoot) {
+    std::error_code ec;
+    return std::filesystem::last_write_time(appRoot + "/assets/real/galaxies.bin", ec);
+}
+}  // namespace
 
 void App::applyUniverseSettings() {
     const int mode = settings_.universeMode;
-    if (mode == uniModeApplied_ && (mode != 1 || settings_.universeSeed == uniSeedApplied_) &&
+    if (!uniReload_ && mode == uniModeApplied_ && (mode != 1 || settings_.universeSeed == uniSeedApplied_) &&
         (mode != 2 || settings_.realPlacement == uniPlacementApplied_))
         return;
+    // A different real black hole (entering Real, or the other placement) brings its own mass; rebuilding
+    // the same one (startup, new catalogue files) keeps the user's, or a running event's.
+    const bool newRealHole = mode == 2 && (uniModeApplied_ != 2 || settings_.realPlacement != uniPlacementApplied_);
     const bool enteringReal = mode == 2 && uniModeApplied_ != 2;
+    const bool leavingReal = mode != 2 && uniModeApplied_ == 2;
+    // The Real universe's placement brings its own black hole (applied below); the user's own comes back on
+    // leaving it (restoreUserMass).
+    if (enteringReal && userMass_ <= 0.0) userMass_ = settings_.bhMassSolar;
+    uniReload_ = false;
     uniModeApplied_ = mode;
     uniSeedApplied_ = settings_.universeSeed;
     uniPlacementApplied_ = settings_.realPlacement;
     universeError_.clear();
+    galaxiesStamp_ = galaxiesStamp(appRoot_);
     if (!universe_.configure(mode, settings_.universeSeed, settings_.realPlacement, appRoot_ + "/assets/real", &universeError_)) {
         logWarn("universe: {}", universeError_);
         return;
     }
-    if (enteringReal && universe_.content().suggestedMassSolar > 0.0) settings_.bhMassSolar = universe_.content().suggestedMassSolar;
+    if (newRealHole && universe_.content().suggestedMassSolar > 0.0) settings_.bhMassSolar = universe_.content().suggestedMassSolar;
+    if (leavingReal) restoreUserMass();
     renderer_.resetAccumulation();
 }
 
@@ -868,10 +930,16 @@ void App::updateTde(double dtM, double dtReal) {
         tdeCtl_.clearRequested = false;
         tde_.clear();
     }
+    bool spawned = false;   // this frame (dtM is then stale: see the step below)
     if (tdeCtl_.spawnRequested) {
         tdeCtl_.spawnRequested = false;
-        // A selected scenario is played exactly as described, including its black hole.
-        if (tdeCtl_.scenario >= 0 && tdeCtl_.scenario < kTdeScenarioCount) settings_.bhMassSolar = tdeCtl_.applyScenario(tdeCtl_.scenario);
+        spawned = true;
+        // A selected scenario is played exactly as described, including its black hole; the user's own comes
+        // back once the event is over (restoreUserMass).
+        if (tdeCtl_.scenario >= 0 && tdeCtl_.scenario < kTdeScenarioCount) {
+            if (userMass_ <= 0.0) userMass_ = settings_.bhMassSolar;
+            settings_.bhMassSolar = tdeCtl_.applyScenario(tdeCtl_.scenario);
+        }
         swallowedAt_ = -1.0;
         tde::StarParams sp;
         sp.massSolar = tdeCtl_.massSolar;
@@ -896,9 +964,13 @@ void App::updateTde(double dtM, double dtReal) {
     }
     if (tdeCtl_.watchRequested) {
         tdeCtl_.watchRequested = false;
-        followName_.clear();
-        flightTarget_.clear();
-        director_.engageCamera();
+        if (director_.active()) {   // Watch with no event running does nothing (the button is always enabled)
+            followName_.clear();
+            flightTarget_.clear();
+            camera_.cancelFlight();        // a flight or auto-orbit still running would release the director again at once
+            camera_.setAutoOrbit(false);
+            director_.engageCamera();
+        }
     }
     if (!tde_.active()) {
         tdeWarp_ = 0.0;
@@ -910,7 +982,7 @@ void App::updateTde(double dtM, double dtReal) {
     if (tde_.stats().swallowedWhole && tde_.stats().accretedFraction > 0.99) {
         const double now = glfwGetTime();
         if (swallowedAt_ < 0.0) swallowedAt_ = now;
-        if (now - swallowedAt_ > 4.0) {
+        if (!settings_.paused && now - swallowedAt_ > 4.0) {   // not while paused: the event holds until P
             tde_.clear();
             director_.stop();
             swallowedAt_ = -1.0;
@@ -937,7 +1009,11 @@ void App::updateTde(double dtM, double dtReal) {
     din.gas = &renderer_.gasParticleStats();
     director_.update(din);
     tdeWarp_ = tdeCtl_.autoWarp ? std::clamp(director_.pace() * units::secondsPerM(settings_.bhMassSolar), 1e-3, 1e11) : 0.0;
-    tde_.step(dtM);
+    // dtM was worked out before the spawn, from the previous event's clock (or the world's) and its black
+    // hole: a time-lapse interval of hundreds of M would carry a fresh star through its whole fall-in, and a
+    // star to be swallowed whole through the horizon, before it is ever drawn. A new event waits a frame and
+    // then runs on its own clock.
+    if (!spawned) tde_.step(dtM);
 }
 
 void App::updateGrb(double dtM, double dtReal) {
@@ -946,14 +1022,21 @@ void App::updateGrb(double dtM, double dtReal) {
         grb_.clear();
         grbDirector_.stop();
     }
+    bool spawned = false;   // this frame (dtM is then stale: see updateTde)
     if (grbCtl_.spawnRequested) {
         grbCtl_.spawnRequested = false;
+        spawned = true;
         if (tde_.active()) {   // one event at a time
             tde_.clear();
             director_.stop();
+            tdeWarp_ = 0.0;    // or updateWorld would pace the merger's next frame by the star's clock
         }
-        // A selected scenario is played exactly as described, including its black hole.
-        if (grbCtl_.scenario >= 0 && grbCtl_.scenario < kGrbScenarioCount) settings_.bhMassSolar = grbCtl_.applyScenario(grbCtl_.scenario);
+        // A selected scenario is played exactly as described, including its black hole; the user's own comes
+        // back once the event is over (restoreUserMass).
+        if (grbCtl_.scenario >= 0 && grbCtl_.scenario < kGrbScenarioCount) {
+            if (userMass_ <= 0.0) userMass_ = settings_.bhMassSolar;
+            settings_.bhMassSolar = grbCtl_.applyScenario(grbCtl_.scenario);
+        }
         grb::Params prm;
         prm.bhMassSolar = settings_.bhMassSolar;
         prm.siteRadiusM = grbCtl_.siteRadiusM;
@@ -967,9 +1050,13 @@ void App::updateGrb(double dtM, double dtReal) {
     }
     if (grbCtl_.watchRequested) {
         grbCtl_.watchRequested = false;
-        followName_.clear();
-        flightTarget_.clear();
-        grbDirector_.engageCamera();
+        if (grbDirector_.active()) {   // as for the star disruption's Watch
+            followName_.clear();
+            flightTarget_.clear();
+            camera_.cancelFlight();
+            camera_.setAutoOrbit(false);
+            grbDirector_.engageCamera();
+        }
     }
     if (!grb_.active()) {
         grbWarp_ = 0.0;
@@ -989,7 +1076,7 @@ void App::updateGrb(double dtM, double dtReal) {
         return;
     }
     grbWarp_ = grbCtl_.autoWarp ? std::clamp(grbDirector_.pace() * units::secondsPerM(settings_.bhMassSolar), 1e-6, 1e11) : 0.0;
-    grb_.step(dtM);
+    if (!spawned) grb_.step(dtM);   // a stale interval would skip the inspiral and the merger (see updateTde)
     if (std::getenv("BHS_DEBUG_TDE")) {
         static int n = 0;
         if (++n % 30 == 0) {
@@ -1035,6 +1122,14 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     }
     if (catalogFetch_.takeFinished()) {   // new catalogue files: reload the real universe
         logInfo("real galaxy catalogue downloaded; reloading the universe");
+        uniReload_ = true;   // the same hole: the mass stays
+    }
+    // A catalogue built by hand (python3 tools/fetch_real_catalogs.py in a terminal, as the status text
+    // suggests) is picked up too: about once a second, galaxies.bin is checked for a new modification time.
+    // Not while the in-app download runs: that reloads once its script has finished.
+    if (uniModeApplied_ == 2 && frameIndex_ % 60 == 0 && catalogFetch_.state() != CatalogFetch::Running &&
+        galaxiesStamp(appRoot_) != galaxiesStamp_) {
+        logInfo("real galaxy catalogue changed on disk; reloading the universe");
         uniModeApplied_ = -1;
     }
     applyUniverseSettings();
@@ -1047,8 +1142,15 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     const double dtEvent = settings_.paused ? 0.0 : eventWarp * static_cast<double>(dt);
     simSeconds_ += dtSim;
     bhSystem_.update(dtSim / sPerMNow);
-    updateTde(dtEvent / sPerMNow, dt);
-    updateGrb(dtEvent / sPerMNow, dt);
+    // P freezes the directors' real-time clocks too (stage timers, pacing, the slow camera drift): a paused
+    // event neither changes stage nor ends by itself.
+    const double dtDirector = settings_.paused ? 0.0 : static_cast<double>(dt);
+    updateTde(dtEvent / sPerMNow, dtDirector);
+    updateGrb(dtEvent / sPerMNow, dtDirector);
+    // An event over (Clear, or by itself) gives back the black hole its scenario replaced.
+    const bool eventActive = tde_.active() || grb_.active();
+    if (wasEventActive_ && !eventActive) restoreUserMass();
+    wasEventActive_ = eventActive;
     buildBodies();
 
     if (tde_.active() && std::getenv("BHS_DEBUG_TDE")) {
@@ -1104,10 +1206,11 @@ void App::updateWorld(float dt, const Camera::Input& in) {
         }
     }
     // Star disruption camera: the director's viewpoint for each stage, until the user flies the camera (or
-    // starts a flight somewhere); Watch hands it back.
+    // starts a flight or the auto-orbit, which Camera::update would otherwise aim at the hole over the
+    // director's pose every frame); Watch hands it back.
     if (director_.cameraEngaged()) {
         const bool steering = glm::length(in.move) > 0.0f || glm::length(in.lookDelta) > 0.0f || in.roll != 0.0f;
-        if (steering || camera_.isTransitioning()) {
+        if (steering || camera_.isTransitioning() || camera_.autoOrbit()) {
             director_.releaseCamera();
         } else {
             glm::dvec3 pos, target;
@@ -1129,7 +1232,7 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     // The merger's director: same rules.
     if (grbDirector_.cameraEngaged()) {
         const bool steering = glm::length(in.move) > 0.0f || glm::length(in.lookDelta) > 0.0f || in.roll != 0.0f;
-        if (steering || camera_.isTransitioning()) {
+        if (steering || camera_.isTransitioning() || camera_.autoOrbit()) {
             grbDirector_.releaseCamera();
         } else {
             glm::dvec3 pos, target;
@@ -1139,6 +1242,21 @@ void App::updateWorld(float dt, const Camera::Input& in) {
         }
     }
 
+    // Ride along (Planets panel): within a ride's reach the ride starts from the planet's current
+    // position, so the first shift below is zero. Farther away, or while a flight is under way (a
+    // ride and a flight would both move the flight's pivot), fly there first; the ride starts when
+    // the flight lands (the Go path).
+    if (!rideRequest_.empty()) {
+        if (const BodyDesc* b = findBody(rideRequest_)) {
+            if (!camera_.isTransitioning() && glm::length(camera_.position() - b->pos) <= 400.0 * b->radius) {
+                followName_ = b->name;
+                followPrevPos_ = b->pos;
+            } else {
+                goToRequest_ = b->name;
+            }
+        }
+        rideRequest_.clear();
+    }
     // Ride along with the planet we are next to (they orbit at a large fraction of c).
     if (!followName_.empty()) {
         if (const BodyDesc* b = findBody(followName_)) {
@@ -1164,7 +1282,10 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     }
     if (followName_.empty() && !camera_.isTransitioning()) {
         for (const BodyDesc& b : bodies_) {
-            if (b.kind == BodyKind::Planet && glm::length(camera_.position() - b.pos) < 60.0 * b.radius) {
+            const bool inZone = glm::length(camera_.position() - b.pos) < 60.0 * b.radius;
+            if (!followLeft_.empty() && b.name == followLeft_) {   // the user got off this one: let it sweep past first
+                if (!inZone) followLeft_.clear();
+            } else if (b.kind == BodyKind::Planet && inZone) {
                 followName_ = b.name;
                 followPrevPos_ = b.pos;
                 break;

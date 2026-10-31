@@ -92,6 +92,9 @@ struct Settings {
     static const char* presetName(int p);
     bool save(const std::string& path) const;
     bool load(const std::string& path);
+    // Every field still at the value `launched` gave it goes back to `loaded`: a launch flag sets a
+    // value for that launch only, and it is saved only where the user changed it since (App::run).
+    void revertUntouched(const Settings& loaded, const Settings& launched);
     std::string fingerprint() const;       // changes whenever any saved field changes
     std::string traceFingerprint() const;  // only fields that change the traced HDR image
 };

@@ -1,6 +1,7 @@
 #pragma once
 #include <glm/glm.hpp>
 
+#include <filesystem>
 #include <string>
 
 #include "BlackHoleSystem.h"
@@ -93,6 +94,8 @@ private:
     Options opt_;
     GLFWwindow* window_ = nullptr;
     Settings settings_;
+    Settings onDisk_;                    // the settings file's values (the defaults without one)
+    Settings launched_;                  // ... after the launch flags: what they set is for that launch only
     Camera camera_;
     Renderer renderer_;
     SkyBaker sky_;
@@ -104,8 +107,10 @@ private:
     int uniModeApplied_ = -1;
     uint32_t uniSeedApplied_ = 0;
     int uniPlacementApplied_ = -1;
+    bool uniReload_ = false;             // rebuild the universe although nothing changed (startup, new catalogue files)
     std::string universeError_;
     CatalogFetch catalogFetch_;          // background download of the real galaxy catalogue
+    std::filesystem::file_time_type galaxiesStamp_{};   // galaxies.bin's modification time when the universe was built
     std::string fetchLine_;
     bool fetchRequest_ = false;
     void applyUniverseSettings();
@@ -125,10 +130,12 @@ private:
     double simSeconds_ = 0.0;            // simulated coordinate time since start (s)
     std::string followName_;             // body the camera rides along with ("" = none)
     glm::dvec3 followPrevPos_{0.0};
+    std::string followLeft_;             // planet the user stopped riding: left alone until the camera is clear of it
     std::string flightTarget_;           // body the current fly-to is heading for
     glm::dvec3 flightPrevPos_{0.0};
     bool wasTransitioning_ = false;
     std::string goToRequest_;            // set by the UI
+    std::string rideRequest_;            // set by the UI: a planet to ride along with
     std::string nearestName_;
     bool turbo_ = false;                 // T: 1000x flight speed for crossing interstellar space
     double nearestDist_ = 0.0;
@@ -152,7 +159,11 @@ private:
     double fixedDt_ = 0.0;               // --dt: fixed frame time for reproducible captures
     double tdeWarp_ = 0.0;               // the star disruption's own clock while its auto warp runs (0: none)
     double swallowedAt_ = -1.0;          // real time when a star swallowed whole was gone (auto clear)
-    void saveSettings();                 // saves settings with the user's own time warp
+    double userMass_ = 0.0;              // the user's black hole mass while an event's scenario or the Real
+                                         // universe's placement plays its own (0: none)
+    bool wasEventActive_ = false;        // an event played last frame (its end gives the black hole back)
+    void restoreUserMass();              // gives the black hole back once an event is over or Real is left
+    void saveSettings();                 // saves settings with the user's own time warp and black hole mass
     float diskFade_ = 1.0f;              // the steady disk fades out while a star disruption plays
     float debrisFade_ = 0.0f;            // ... and the disk the debris builds forms (a ring spreading inward)
     double reloadTimer_ = 0.0;
