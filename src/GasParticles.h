@@ -20,6 +20,9 @@ struct GasParticlesRef {
     double timeM = 0.0;         // event clock of this frame (stats are tagged with it)
     float farRadius = 1e30f;    // M: bound gas farther out predicts when it comes back
     float returnFraction = 0.0025f;   // of all particles: stats().returnInM is when this much is back
+    int law = 0;                // shading: 0 star-disruption gas, 1 merger particles (see gas_splat.comp)
+    glm::vec3 centre{0.0f};     // law 1: the kilonova shell's centre (limb darkening)
+    bool wantStats = true;      // measure stats() from this set
 };
 
 // Measured while drawing; read back a few frames late (valid = false until the first read-back).
@@ -68,6 +71,7 @@ private:
     GLuint hashKeys_ = 0, hashCounts_ = 0, momKeys_ = 0, momVals_ = 0;
     GLuint splats_ = 0;
     size_t splatCap_ = 0;
+    GLuint areaBuf_[2] = {0, 0};   // fill-area sums (this frame, last frame) per particle set (indexed by law)
     static constexpr int kRing = 3;
     GLuint cmd_[kRing] = {};
     GLsync cmdFence_[kRing] = {};

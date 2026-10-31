@@ -1,4 +1,6 @@
 #pragma once
+#include "GrbControls.h"
+#include "grb/GrbModel.h"
 #include <string>
 #include <vector>
 
@@ -50,6 +52,14 @@ struct UiContext {
     const char* tdeCaption = nullptr;   // ... and what is happening in it
     float tdeFade = 0.0f;               // 0..1: black between two of the director's shots
     double tdeWarp = 0.0;           // the star disruption's own clock (simulated s per real s)
+    GrbControls* grb = nullptr;     // the neutron-star merger
+    bool grbActive = false;
+    const grb::State* grbState = nullptr;
+    const grb::Model* grbModel = nullptr;
+    double grbWarp = 0.0;
+    const char* eventTitle = nullptr;   // the caption overlay: whichever event plays
+    const char* eventCaption = nullptr;
+    float eventFade = 0.0f;
     bool diskHidden = false;        // the steady disk is faded out while a star disruption plays
     const std::vector<UniverseTarget>* uniTargets = nullptr;
     const char* universeStatus = "";

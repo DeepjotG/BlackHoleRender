@@ -42,6 +42,7 @@ struct FrameInput {
     int gasCount = 0;
     float gasRefLen = 1.0f;       // M, see uGasRefLen in gas.glsl
     const GasParticlesRef* particles = nullptr;   // star-disruption particles, drawn instead of the volumes
+    const GasParticlesRef* particlesB = nullptr;  // a second set: the neutron-star merger's kilonova and jets
     // 3D universe sky (see UniverseScene)
     bool universe = false;
     GLuint uniCube = 0, uniStars = 0, uniTiles = 0;

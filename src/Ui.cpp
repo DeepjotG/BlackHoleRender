@@ -140,13 +140,13 @@ const char* lookName(universe::PlanetLook l) {
 }
 // The star disruption's stage, captioned at the bottom of the screen like a documentary.
 void drawTdeCaption(const UiContext& c) {
-    if (!c.tdeActive) return;
-    if (c.tdeFade > 0.001f) {   // a cut between two shots: through black
+    if (!c.tdeActive && !c.grbActive) return;
+    if (c.eventFade > 0.001f) {   // a cut between two shots: through black
         const ImGuiViewport* v = ImGui::GetMainViewport();
         ImGui::GetBackgroundDrawList()->AddRectFilled(v->Pos, ImVec2(v->Pos.x + v->Size.x, v->Pos.y + v->Size.y),
-                                                      IM_COL32(0, 0, 0, static_cast<int>(255.0f * std::min(c.tdeFade, 1.0f))));
+                                                      IM_COL32(0, 0, 0, static_cast<int>(255.0f * std::min(c.eventFade, 1.0f))));
     }
-    if (!c.tdeTitle || !*c.tdeTitle) return;
+    if (!c.eventTitle || !*c.eventTitle) return;
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 0.5f * vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y - 28.0f), ImGuiCond_Always,
                             ImVec2(0.5f, 1.0f));
@@ -155,8 +155,8 @@ void drawTdeCaption(const UiContext& c) {
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
     if (ImGui::Begin("##tdeCaption", nullptr, flags)) {
-        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.tdeTitle);
-        if (c.tdeCaption && *c.tdeCaption) ImGui::TextWrapped("%s", c.tdeCaption);
+        ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.eventTitle);
+        if (c.eventCaption && *c.eventCaption) ImGui::TextWrapped("%s", c.eventCaption);
     }
     ImGui::End();
 }
@@ -492,6 +492,47 @@ void Ui::draw(UiContext& c) {
         }
         sliderLog("Gas brightness", &s.gasBrightness, 0.5f, 200.0f);
         sliderLog("Gas opacity", &s.gasOpacity, 0.05f, 20.0f);
+    }
+
+    // ---- neutron-star merger (gamma-ray burst) ----
+    if (c.grb && ImGui::CollapsingHeader("Neutron star merger (gamma-ray burst)")) {
+        GrbControls& g = *c.grb;
+        if (!g.moduleAvailable) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "The merger's particle shader is not available in this build.");
+        const char* scen[kGrbScenarioCount + 1];
+        for (int i = 0; i < kGrbScenarioCount; ++i) scen[i] = kGrbScenarios[i].name;
+        scen[kGrbScenarioCustom] = "Custom (the orbit below, this black hole)";
+        if (ImGui::Combo("Scenario##grb", &g.scenario, scen, kGrbScenarioCount + 1) && g.scenario < kGrbScenarioCount)
+            s.bhMassSolar = g.applyScenario(g.scenario);
+        const double before[2] = {g.siteRadiusM, g.jetTiltDeg};
+        sliderLogD("Distance from the hole (M)##grb", &g.siteRadiusM, 4.0, 2000.0, "%.0f");
+        const double tiltMin = 0.0, tiltMax = 90.0;
+        ImGui::SliderScalar("Jet aim (deg from the hole)", ImGuiDataType_Double, &g.jetTiltDeg, &tiltMin, &tiltMax, "%.0f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 aims one jet straight at the black hole (it falls in); a few degrees off, it is bent past it.");
+        if (g.siteRadiusM != before[0] || g.jetTiltDeg != before[1]) g.scenario = kGrbScenarioCustom;
+        ImGui::TextDisabled("Two 1.4-solar-mass neutron stars, 120 km apart, circling the black hole. The whole event is about a minute and a half.");
+        ImGui::BeginDisabled(!g.moduleAvailable);
+        if (ImGui::Button("Spawn binary")) g.spawnRequested = true;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Clear##grb")) g.clearRequested = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Watch##grb")) g.watchRequested = true;
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto time warp##grb", &g.autoWarp);
+        if (c.grbActive && c.grbState && c.grbModel) {
+            const grb::State& st = *c.grbState;
+            const double sPerM = c.grbModel->secondsPerM(), mPerM = c.grbModel->metersPerM();
+            if (c.eventTitle && *c.eventTitle) ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.5f, 1.0f), "%s", c.eventTitle);
+            if (c.eventCaption && *c.eventCaption) ImGui::TextWrapped("%s", c.eventCaption);
+            if (!st.merged)
+                ImGui::Text("%.1f km apart, one orbit every %.2f ms, merging in %s   event clock: 1 s = %s", st.separationM * mPerM * 1e-3,
+                            st.periodM * sPerM * 1e3, units::formatDuration((c.grbModel->mergeTimeM() - st.timeM) * sPerM).c_str(),
+                            units::formatDuration(c.grbWarp).c_str());
+            else
+                ImGui::Text("%s after the merger   kilonova %s across at %.0f K   jets %s long   event clock: 1 s = %s",
+                            units::formatDuration(st.tauM * sPerM).c_str(), units::formatDistance(2.0 * st.knRadiusM * mPerM).c_str(), st.knTempK,
+                            units::formatDistance(std::max(st.jetHeadM[0], st.jetHeadM[1]) * mPerM).c_str(), units::formatDuration(c.grbWarp).c_str());
+        }
     }
 
     // ---- travel ----

@@ -28,6 +28,12 @@ struct Splat {
 };
 layout(std430, binding = 13) writeonly buffer Splats { Splat sOut[]; };
 layout(std430, binding = 14) buffer DrawCmd { uint cmdCount, cmdInstances, cmdFirst, cmdBase; };
+// Screen area of all in-frame splats before decimation (units of 64 px^2): this frame's sum and the last
+// frame's. The local overdraw estimate sees one cell's depth only; a line of sight through a large shell
+// crosses a hundred overlapping splats, so the total fill is bounded globally with a one-frame lag.
+layout(std430, binding = 16) buffer AreaSum { uint aNow, aLast; };
+shared uint gArea;
+uniform float uAreaBudget;     // px^2 of fill per frame (a few screens)
 
 uniform sampler2D uLens;
 uniform int uCount;
@@ -41,6 +47,9 @@ uniform float uAlphaCrit;      // the shadow's angular radius at the camera
 uniform float uGasBrightness, uGasOpacity;
 uniform float uRefLen;         // M: gas optically thick over this length counts as dense (gas.glsl uGasRefLen)
 uniform vec3 uDiskFade;        // the disk forming from this gas: x outer radius (M), y slab half-height per radius, z how far formed
+uniform int uGasLaw;           // 0: star-disruption gas (tde_visual.glsl); 1: merger particles, whose optical depth, glow,
+                               //    temperature and noise scale come in pAux (grb_particles.comp)
+uniform vec3 uLawCentre;       // law 1: centre of the kilonova shell (limb darkening)
 uniform uint uMaxSplats;
 uniform float uMaxExtent;      // px: splats wider than this (sigma) are a uniform haze and are dropped
 
@@ -50,9 +59,9 @@ const float MAX_BOOST = 16.0;
 const float BOOST_POWER = 0.6; // how far a sub-pixel image keeps its peak (1) rather than its integral (0)
 const float MAX_ASPECT2 = 64.0;   // a kernel is at most 8x longer than wide
 const float FILAMENT_TAU = 0.6;   // optical depth across a stream drawn as a filament
-const float TARGET_LAYERS = 24.0; // splats stacked per pixel: beyond this a fraction of the particles is drawn
-const float AREA_BUDGET = 3000.0; // px^2 per splat: tenuous gas with huge, faint splats is drawn by a fraction of them
-const float MIN_KEEP = 0.01;
+const float TARGET_LAYERS = 12.0; // splats stacked per pixel: beyond this a fraction of the particles is drawn
+const float AREA_BUDGET = 2000.0; // px^2 per splat: tenuous gas with huge, faint splats is drawn by a fraction of them
+const float MIN_KEEP = 0.002;
 const float MIN_PEAK = 3e-4;      // peak opacity below which a splat is not worth drawing
 const float OVERDRAW_PX = 16.0;   // the cell (in px) whose particle count estimates the stacking
 
@@ -189,7 +198,9 @@ void emit(vec3 d, mat3 M, mat3 S, float tau, vec3 col, float pick, vec3 over, fl
     float aCell = over.y * clamp(mag, 0.05, 20.0);
     float aSplat = PI * sqrt(det);
     float layers = over.x * aSplat / max(aCell, aSplat);
-    float keep = clamp(min(TARGET_LAYERS / max(layers, 1e-6), AREA_BUDGET / aSplat), MIN_KEEP, 1.0);
+    atomicAdd(gArea, uint(min(aSplat / 64.0, 4.0e6) + 0.5));
+    float keepGlobal = min(1.0, uAreaBudget / max(float(aLast) * 64.0, 1.0));
+    float keep = clamp(min(min(TARGET_LAYERS / max(layers, 1e-6), AREA_BUDGET / aSplat), keepGlobal), MIN_KEEP, 1.0);
     if (pick >= keep) return;
     t /= keep;
     if (t < MIN_PEAK) return;
@@ -203,9 +214,18 @@ void emit(vec3 d, mat3 M, mat3 S, float tau, vec3 col, float pick, vec3 over, fl
     sOut[slot].c = vec4(col, 0.0);
 }
 
+void particle(int i);
+
 void main() {
+    if (gl_LocalInvocationID.x == 0u) gArea = 0u;
+    barrier();
     int i = int(gl_GlobalInvocationID.x);
-    if (i >= uCount) return;
+    if (i < uCount) particle(i);
+    barrier();
+    if (gl_LocalInvocationID.x == 0u && gArea > 0u) atomicAdd(aNow, gArea);
+}
+
+void particle(int i) {
     vec4 pos = pPos[i];
     if (!gasParticleDrawn(pos)) return;
     vec3 p = gasParticlePosition(pos, uFrozen.xyz);
@@ -259,10 +279,27 @@ void main() {
     // Across a filament the splats stack nLocal * areaK * wFil deep: whatever the sampling, the total
     // optical depth across the stream comes to FILAMENT_TAU.
     tau = max(tau, sparse * FILAMENT_TAU / max(nLocal * areaK * wFil, 1.0));
+    if (uGasLaw == 1) {   // kilonova and jet particles: their own optical depth, temperature and glow
+        vec4 aux = pAux[i];
+        float ns = max(abs(aux.w), 1e-9);
+        float turb1 = smoothstep(-0.25, 0.25, fbm3(p / ns + vec3(7.0), 2, 0.5, 23u));
+        float mot1 = smoothstep(-0.2, 0.2, fbm3(p / (0.25 * ns) + vec3(3.0), 2, 0.5, 29u));
+        vec4 bb1 = blackbody(aux.z * 1e4 * (0.92 + 0.16 * turb1));
+        // Normalised to the blackbody's colour: at 40,000 K the visible luminance factor is tens of times the
+        // Sun's and would burn everything out; aux.y sets the surface brightness in units of the gas brightness.
+        col = bb1.rgb * (aux.y * uGasBrightness * (0.55 + 0.9 * turb1) * (0.7 + 0.6 * mot1));
+        if (aux.w > 0.0) {   // the shell: a photosphere, darker towards its limb (cooler, higher layers show there)
+            float mu = abs(dot(normalize(p - uLawCentre), normalize(p - uCamPos)));
+            col *= 0.3 + 0.7 * mu;
+        }
+        col /= 1.0 + dot(col, vec3(0.2126, 0.7152, 0.0722)) / 8.0;
+        tau = aux.x * uGasOpacity;
+        sparse = 0.0;
+    }
     // As the disk forms the gas condenses into it: particles within the disk's extent give way to it
     // entirely, the hot cloud round the hole largely.
     float rcyl = length(p.xz);
-    if (uDiskFade.z > 0.0) {
+    if (uDiskFade.z > 0.0 && uGasLaw == 0) {
         bool inDisk = rcyl < uDiskFade.x && abs(p.y) < uDiskFade.y * rcyl + 0.5;
         tau *= 1.0 - uDiskFade.z * (inDisk ? 1.0 : 0.7);
     }
@@ -275,11 +312,14 @@ void main() {
     float cellPx = gasCellSize(lvO) * focal / D;
     vec3 over = vec3(float(hashCount(p, lvO)), cellPx * cellPx, (focal / D) * (focal / D) * areaK);
     float sigStruct = sparse > 0.5 ? wFil / 2.35 * focal / D : 0.0;
-    if (uLensing == 0 || rt >= LENS_RMAX * 0.9) {
+    float rc = length(uCamPos);
+    // Gas close to the camera (within 1% of its distance from the hole) is projected straight from
+    // camera-relative coordinates: the lens table works in hole-centred ones, whose precision at a
+    // thousand kilometres from the camera is a screen width, and the bending over that path is nil.
+    if (uLensing == 0 || rt >= LENS_RMAX * 0.9 || D < 0.01 * rc) {
         emit(u, (mat3(1.0) - outerProduct(u, u)) / D, S, tau, col, pick, over, sigStruct);
         return;
     }
-    float rc = length(uCamPos);
     vec3 ch = uCamPos / rc;
     vec3 ph = p / rt;
     float cphi = clamp(dot(ch, ph), -1.0, 1.0);

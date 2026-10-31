@@ -1,0 +1,95 @@
+#version 460 core
+// Places the particles of a neutron-star merger's aftermath (src/grb/GrbEvent.cpp) for the gas splat
+// renderer (gas_splat.comp, law 1): the kilonova shell expanding homologously from the merger point, and
+// the twin jets (a bright narrow core inside a slower, wider cocoon) along their spines. Every particle
+// has a fixed seed (its index), so the pattern expands with the flow instead of boiling.
+// Output: pPos (xyz, w = 0 active), pVel (xyz, w = 0), pAux (x optical depth through the splat's centre,
+// y emission multiplier, z temperature / 1e4 K, w noise scale in M, negative for the jets).
+layout(local_size_x = 256) in;
+#include "common.glsl"
+
+layout(std430, binding = 0) writeonly buffer PartPos { vec4 pPos[]; };
+layout(std430, binding = 1) writeonly buffer PartVel { vec4 pVel[]; };
+layout(std430, binding = 2) writeonly buffer PartAux { vec4 pAux[]; };
+const int SPINE = 64;
+layout(std430, binding = 15) readonly buffer Spines { vec4 sSpine[]; };   // [2][SPINE]: xyz, w = path length
+
+uniform int uCountKn, uCountJet;          // kilonova particles; particles per jet (core + cocoon)
+uniform int uCoreCount;                   // the first this many of each jet are the core
+uniform vec3 uCentre;                     // of the ejecta
+uniform vec4 uKn;                         // radius (M), shell fraction, optical depth per particle, emission
+uniform vec2 uKnTemp;                     // polar, equatorial (/1e4 K)
+uniform vec3 uAxis;                       // the jets' axis (for the kilonova's polar / equatorial split)
+uniform vec4 uHeads;                      // jet 0 head, cocoon 0 head, jet 1 head, cocoon 1 head (path length, M; 0: not launched)
+uniform vec4 uJet;                        // cos(core half-angle), cos(cocoon half-angle), tau per core particle, per cocoon particle
+uniform vec2 uJetTemp;                    // core, cocoon (/1e4 K)
+uniform vec2 uJetBright;                  // core, cocoon
+uniform float uEjectaSpeed;               // c
+
+vec3 spineAt(int which, float len, out vec3 tangent) {
+    float f = clamp(len / max(sSpine[which * SPINE + SPINE - 1].w, 1e-9), 0.0, 1.0) * float(SPINE - 1);
+    int k = min(int(floor(f)), SPINE - 2);
+    float t = f - float(k);
+    vec3 a = sSpine[which * SPINE + k].xyz, b = sSpine[which * SPINE + k + 1].xyz;
+    tangent = normalize(b - a + vec3(1e-30));
+    return mix(a, b, t);
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    int total = uCountKn + 2 * uCountJet;
+    if (i >= total) return;
+    vec3 rnd = hash3u(uvec3(uint(i), 0x9E3779B9u, 0x7F4A7C15u));
+    vec3 rnd2 = hash3u(uvec3(uint(i), 0x85EBCA6Bu, 0xC2B2AE35u));
+    vec4 pos = vec4(0.0), vel = vec4(0.0), aux = vec4(0.0);
+    if (i < uCountKn) {
+        // The shell: uniform in volume between (1 - f) R and R, a polar / equatorial split in temperature
+        // and speed (the equatorial ejecta are slower, denser and redder).
+        float R = uKn.x;
+        if (R <= 0.0) { pPos[i] = vec4(0.0, 0.0, 0.0, 3.0); return; }   // state 3: unused
+        float z = 2.0 * rnd.x - 1.0;
+        float ph = TWO_PI * rnd.y;
+        float s = sqrt(max(1.0 - z * z, 0.0));
+        vec3 dir = vec3(s * cos(ph), s * sin(ph), z);
+        // dir is in a frame whose z is the axis: rotate it so that (0, 0, 1) -> uAxis.
+        vec3 ax = normalize(uAxis);
+        vec3 t1 = normalize(cross(ax, abs(ax.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+        vec3 t2 = cross(ax, t1);
+        vec3 d = dir.x * t1 + dir.y * t2 + dir.z * ax;
+        float polar = smoothstep(0.35, 0.8, abs(dir.z));
+        float speed = mix(0.8, 1.0, polar);          // of the polar ejecta speed: mildly oblate
+        float rin = (1.0 - uKn.y) * R;
+        float r = pow(mix(rin * rin * rin, R * R * R, rnd.z), 1.0 / 3.0) * speed;
+        pos = vec4(uCentre + d * r, 0.0);
+        vel = vec4(d * (uEjectaSpeed * speed * r / max(R, 1e-30)), 0.0);
+        float T = mix(uKnTemp.y, uKnTemp.x, polar) * (0.94 + 0.12 * rnd2.x);
+        aux = vec4(uKn.z, uKn.w * (0.8 + 0.4 * rnd2.y), T, 0.3 * R);
+    } else {
+        int j = i - uCountKn;
+        int which = j / uCountJet;
+        int k = j - which * uCountJet;
+        bool core = k < uCoreCount;
+        float head = which == 0 ? (core ? uHeads.x : uHeads.y) : (core ? uHeads.z : uHeads.w);
+        if (head <= 0.0) { pPos[i] = vec4(0.0, 0.0, 0.0, 3.0); return; }
+        // Along the spine: denser towards the head (the forward shock); within the cone: uniform in solid angle.
+        float s = core ? pow(rnd.x, 0.6) : pow(rnd.x, 0.8);
+        float cosMax = core ? uJet.x : uJet.y;
+        float cosT = 1.0 - rnd.y * (1.0 - cosMax);
+        float sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
+        float ph = TWO_PI * rnd.z;
+        vec3 tangent;
+        vec3 c = spineAt(which, s * head * cosT, tangent);
+        vec3 n1 = normalize(cross(tangent, abs(tangent.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+        vec3 n2 = cross(tangent, n1);
+        float lateral = s * head * sinT;
+        pos = vec4(c + lateral * (cos(ph) * n1 + sin(ph) * n2), 0.0);
+        vel = vec4(tangent * (core ? 1.0 : 0.6), 0.0);
+        float bump = 1.0 + (core ? 3.0 : 1.0) * exp(-(1.0 - s) / 0.12);   // the shock at the head
+        float width = max(s * head * sqrt(1.0 - cosMax * cosMax), 1e-9);
+        aux = vec4(core ? uJet.z : uJet.w, (core ? uJetBright.x : uJetBright.y) * bump * (0.8 + 0.4 * rnd2.x),
+                   (core ? uJetTemp.x : uJetTemp.y) * (0.95 + 0.1 * rnd2.y), -0.5 * width);   // < 0: a jet, not the shell
+    }
+    pPos[i] = pos;
+    pVel[i] = vel;
+    pAux[i] = aux;
+}

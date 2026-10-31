@@ -273,6 +273,7 @@ int App::run(const Options& opt) {
     sky_.bake(settings_);
     if (!renderer_.init()) logError("shader compilation failed; fix the shaders and press F5");
     tdeCtl_.moduleAvailable = tde_.init(262144);
+    grbCtl_.moduleAvailable = grb_.init();
     if (!universe_.init()) logWarn("3D universe shaders failed to compile; only the painted backdrop is available");
     applyUniverseSettings();
     if (!tdeCtl_.moduleAvailable) logInfo("star-disruption simulation not available in this build");
@@ -282,6 +283,14 @@ int App::run(const Options& opt) {
             tdeCtl_.spawnRequested = true;
         } else {
             logWarn("--tde ignored: the star-disruption simulation is not in this build");
+        }
+    }
+    if (opt.grbScenario >= 1 && opt.grbScenario <= kGrbScenarioCount) {
+        if (grbCtl_.moduleAvailable) {
+            settings_.bhMassSolar = grbCtl_.applyScenario(opt.grbScenario - 1);
+            grbCtl_.spawnRequested = true;
+        } else {
+            logWarn("--grb ignored: the merger's particle shader is not available");
         }
     }
     fixedDt_ = opt.fixedDt;
@@ -320,6 +329,7 @@ int App::run(const Options& opt) {
 void App::shutdown() {
     ui_.shutdown();
     tde_.shutdown();
+    grb_.shutdown();
     universe_.shutdown();
     renderer_.shutdown();
     sky_.shutdown();
@@ -489,6 +499,10 @@ void App::frame() {
     static const double refRadii = std::getenv("BHS_GAS_REFLEN") ? std::atof(std::getenv("BHS_GAS_REFLEN")) : 8.0;
     fi.gasRefLen = static_cast<float>(std::max(refRadii * tde_.starRadiusM(), 1e-6));
     gasParticles_.refLen = fi.gasRefLen;
+    if (grb_.merged() && !noGas && renderer_.gasParticlesOk()) {
+        grbParticles_ = grb_.particles();
+        if (grbParticles_.count > 0) fi.particlesB = &grbParticles_;
+    }
     if (std::getenv("BHS_DEBUG_TDE") && !gasRefs_.empty()) {
         static int n = 0;
         if (++n % 30 == 0) {
@@ -617,6 +631,20 @@ void App::frame() {
         ctx.tdeTitle = director_.title();
         ctx.tdeCaption = director_.caption();
         ctx.tdeFade = director_.fade();
+        ctx.grb = &grbCtl_;
+        ctx.grbActive = grb_.active();
+        ctx.grbState = &grb_.state();
+        ctx.grbModel = &grb_.model();
+        ctx.grbWarp = grbWarp_ > 0.0 ? grbWarp_ : settings_.timeWarp;
+        if (grb_.active()) {   // the caption overlay follows whichever event plays
+            ctx.eventTitle = grbDirector_.title();
+            ctx.eventCaption = grbDirector_.caption();
+            ctx.eventFade = grbDirector_.fade();
+        } else if (tde_.active()) {
+            ctx.eventTitle = director_.title();
+            ctx.eventCaption = director_.caption();
+            ctx.eventFade = director_.fade();
+        }
         ctx.tdeWarp = tdeWarp_ > 0.0 ? tdeWarp_ : settings_.timeWarp;
         ctx.diskHidden = tde_.active() && !tdeCtl_.keepDisk;
         ctx.uniTargets = &universe_.targets();
@@ -808,6 +836,7 @@ void App::buildBodies() {
         b.info = "The star on its way in";
         bodies_.push_back(b);
     }
+    grb_.appendBodies(bodies_, settings_.gasBrightness);
     universe_.update(camera_.position(), simSeconds_, settings_, bodies_);
 }
 
@@ -856,6 +885,10 @@ void App::updateTde(double dtM, double dtReal) {
         op.retrograde = tdeCtl_.retrograde;
         op.startDistanceRt = 3.0;
         tde_.spawn(sp, op, settings_.bhMassSolar, tdeCtl_.particles);
+        if (grb_.active()) {   // one event at a time
+            grb_.clear();
+            grbDirector_.stop();
+        }
         renderer_.resetGasParticleStats();
         director_.start(tde_.starPosition(), tde_.starVelocity());
         tdeCtl_.watchRequested = true;
@@ -907,6 +940,69 @@ void App::updateTde(double dtM, double dtReal) {
     tde_.step(dtM);
 }
 
+void App::updateGrb(double dtM, double dtReal) {
+    if (grbCtl_.clearRequested) {
+        grbCtl_.clearRequested = false;
+        grb_.clear();
+        grbDirector_.stop();
+    }
+    if (grbCtl_.spawnRequested) {
+        grbCtl_.spawnRequested = false;
+        if (tde_.active()) {   // one event at a time
+            tde_.clear();
+            director_.stop();
+        }
+        // A selected scenario is played exactly as described, including its black hole.
+        if (grbCtl_.scenario >= 0 && grbCtl_.scenario < kGrbScenarioCount) settings_.bhMassSolar = grbCtl_.applyScenario(grbCtl_.scenario);
+        grb::Params prm;
+        prm.bhMassSolar = settings_.bhMassSolar;
+        prm.siteRadiusM = grbCtl_.siteRadiusM;
+        prm.jetTiltDeg = grbCtl_.jetTiltDeg;
+        prm.siteInclinationDeg = grbCtl_.siteInclinationDeg;
+        prm.siteLongitudeDeg = grbCtl_.siteLongitudeDeg;
+        prm.startSeparationKm = grbCtl_.startSeparationKm;
+        grb_.spawn(prm);
+        grbDirector_.start(grb_.model());
+        grbCtl_.watchRequested = true;
+    }
+    if (grbCtl_.watchRequested) {
+        grbCtl_.watchRequested = false;
+        followName_.clear();
+        flightTarget_.clear();
+        grbDirector_.engageCamera();
+    }
+    if (!grb_.active()) {
+        grbWarp_ = 0.0;
+        grbDirector_.stop();
+        return;
+    }
+    GrbDirector::Input din;
+    din.dt = dtReal;
+    din.state = &grb_.state();
+    din.model = &grb_.model();
+    din.cameraPos = camera_.position();
+    grbDirector_.update(din);
+    if (grbDirector_.finished()) {   // the ejecta have swept past the camera
+        grb_.clear();
+        grbDirector_.stop();
+        grbWarp_ = 0.0;
+        return;
+    }
+    grbWarp_ = grbCtl_.autoWarp ? std::clamp(grbDirector_.pace() * units::secondsPerM(settings_.bhMassSolar), 1e-6, 1e11) : 0.0;
+    grb_.step(dtM);
+    if (std::getenv("BHS_DEBUG_TDE")) {
+        static int n = 0;
+        if (++n % 30 == 0) {
+            const grb::State& st = grb_.state();
+            const double sPerM = grb_.model().secondsPerM(), mPerM = grb_.model().metersPerM();
+            logInfo("grb t={:.4g} s stage {} pace {:.3g} s/s fade {:.2f} | sep {:.1f} km P {:.2f} ms | kn R {:.4g} M T {:.0f} K tau {:.2f} | jets {:.4g} M b {:.2f} | cam {:.4g} M from the centre, {:.3g} M from the hole",
+                    st.timeM * sPerM, static_cast<int>(grbDirector_.stage()), grbDirector_.pace() * sPerM, grbDirector_.fade(),
+                    st.separationM * mPerM * 1e-3, st.periodM * sPerM * 1e3, st.knRadiusM, st.knTempK, st.knTau, std::max(st.jetHeadM[0], st.jetHeadM[1]), st.jetBright,
+                    glm::length(camera_.position() - st.centre), glm::length(camera_.position()));
+        }
+    }
+}
+
 void App::updateWorld(float dt, const Camera::Input& in) {
     // Test hook: BHS_SWITCH_UNIVERSE="frame:mode[,frame:mode...]" picks a universe mid-run, exactly as the
     // Universe menu does (mode 0 backdrop, 1 invented, 2 real).
@@ -947,10 +1043,12 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     // its own, faster clock (auto warp) so the event stays watchable without the planets racing around.
     const double sPerMNow = units::secondsPerM(settings_.bhMassSolar);
     const double dtSim = settings_.paused ? 0.0 : settings_.timeWarp * static_cast<double>(dt);
-    const double dtEvent = settings_.paused ? 0.0 : (tdeWarp_ > 0.0 ? tdeWarp_ : settings_.timeWarp) * static_cast<double>(dt);
+    const double eventWarp = tdeWarp_ > 0.0 ? tdeWarp_ : (grbWarp_ > 0.0 ? grbWarp_ : settings_.timeWarp);
+    const double dtEvent = settings_.paused ? 0.0 : eventWarp * static_cast<double>(dt);
     simSeconds_ += dtSim;
     bhSystem_.update(dtSim / sPerMNow);
     updateTde(dtEvent / sPerMNow, dt);
+    updateGrb(dtEvent / sPerMNow, dt);
     buildBodies();
 
     if (tde_.active() && std::getenv("BHS_DEBUG_TDE")) {
@@ -1025,6 +1123,19 @@ void App::updateWorld(float dt, const Camera::Input& in) {
                         target.x, target.y, target.z, star.x, star.y, star.z, glm::length(rel),
                         glm::degrees(std::acos(std::clamp(glm::dot(glm::normalize(rel), fwd), -1.0, 1.0))));
             }
+        }
+    }
+
+    // The merger's director: same rules.
+    if (grbDirector_.cameraEngaged()) {
+        const bool steering = glm::length(in.move) > 0.0f || glm::length(in.lookDelta) > 0.0f || in.roll != 0.0f;
+        if (steering || camera_.isTransitioning()) {
+            grbDirector_.releaseCamera();
+        } else {
+            glm::dvec3 pos, target;
+            grbDirector_.view(pos, target);
+            camera_.setPose(pos, camera_.orientation());
+            camera_.lookAt(target);
         }
     }
 

@@ -197,6 +197,38 @@ places the black hole's lensing shows it (its direct image and the one round the
 hole), so the torn star stays sharp however near or far the camera is, and a stream thinner than a
 pixel is drawn as a pixel-wide line, as an optically thick stream would look.
 
+## Neutron-star merger (gamma-ray burst)
+
+The *Neutron star merger* panel puts a pair of neutron stars in orbit around the black hole and plays
+their collision: a short gamma-ray burst with its kilonova, directed in five stages like the star
+disruption, about two minutes long.
+
+* **Inspiral** (slow motion): two 1.4-solar-mass stars, 24 km across, start 120 km apart. Gravitational
+  waves drain the orbit (Peters' quadrupole formula), so the whirl tightens and quickens, the chirp,
+  until the stars touch about a second later after some sixty orbits. The camera rides with them, the
+  black hole looming behind.
+* **Merger**: they merge in a millisecond; a fiftieth of a solar mass of neutron-rich matter is flung
+  out at a fifth of the speed of light (slower and redder towards the orbital plane) and, a moment
+  later, twin jets a few degrees wide punch out along the spin axis inside a slower, wider cocoon.
+  The flash engulfs the close camera, which cuts to one outside the fireball; that camera then pulls
+  back steadily, keeping the swelling ball the same size while the black hole behind it shrinks (the
+  ejecta grow a hundred-thousand-fold in a minute), until it reaches the wide view.
+* **The burst** (time-lapse to about half an hour): the jets coast at almost the speed of light; their
+  spines follow light-like paths in the hole's gravity, so the one aimed a few degrees past the black
+  hole is visibly bent around it (aimed straight at it, it falls in). The ejecta swell into a
+  white-hot kilonova, the furnace that forges gold and platinum.
+* **The kilonova engulfs the black hole**: the jets fade into an afterglow while the still white-hot
+  cloud sweeps over the black hole and then the camera.
+* **The days after** (time-lapse, from far out): the ejecta cool from white through yellow to red
+  (AT2017gfo's colour evolution) and turn transparent over ten days, dispersing the gold and
+  platinum they forged; then the event ends by itself.
+
+Scenarios set the black hole, the binary's distance from it and the jet's aim; *Custom* keeps the
+current hole. The stars are drawn as lensed bodies; the kilonova shell and the jets are particles
+drawn by the same lensed splat renderer as the disruption's gas (their own opacity, temperature and
+glow laws); the steady accretion disk is unaffected. Command line: `--grb N` plays scenario N from
+the start.
+
 ## Controls
 
 | Input | Action |

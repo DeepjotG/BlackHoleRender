@@ -122,6 +122,8 @@ add_executable(blackhole
   src/Renderer.cpp
   src/GasParticles.cpp
   src/TdeDirector.cpp
+  src/grb/GrbEvent.cpp
+  src/grb/GrbDirector.cpp
   src/SkyBaker.cpp
   src/DiskTextures.cpp
   src/Ui.cpp
@@ -183,3 +185,6 @@ endif()
 add_executable(tde_director_tests tests/tde_director_tests.cpp src/TdeDirector.cpp)
 target_link_libraries(tde_director_tests PRIVATE bhs_core glad_gl_core_46)
 add_test(NAME tde_director_tests COMMAND tde_director_tests)
+add_executable(grb_tests tests/grb_tests.cpp)
+target_link_libraries(grb_tests PRIVATE bhs_core)
+add_test(NAME grb_tests COMMAND grb_tests)

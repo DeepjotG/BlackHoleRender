@@ -82,6 +82,11 @@ bool GasParticleRenderer::load(std::string& log) {
         glCreateBuffers(kRing, cmd_);
         for (GLuint b : cmd_) glNamedBufferStorage(b, sizeof(CmdBlock), nullptr, GL_DYNAMIC_STORAGE_BIT);
     }
+    if (!areaBuf_[0]) {
+        glCreateBuffers(2, areaBuf_);
+        const GLuint zeros[2] = {0, 0};
+        for (GLuint b : areaBuf_) glNamedBufferStorage(b, sizeof zeros, zeros, GL_DYNAMIC_STORAGE_BIT);
+    }
     lensCamR_ = -1.0f;
     return ok;
 }
@@ -111,6 +116,8 @@ void GasParticleRenderer::destroy() {
     if (momVals_) glDeleteBuffers(1, &momVals_);
     if (splats_) glDeleteBuffers(1, &splats_);
     if (cmd_[0]) glDeleteBuffers(kRing, cmd_);
+    if (areaBuf_[0]) glDeleteBuffers(2, areaBuf_);
+    areaBuf_[0] = areaBuf_[1] = 0;
     for (GLsync& f : cmdFence_)
         if (f) {
             glDeleteSync(f);
@@ -260,6 +267,11 @@ void GasParticleRenderer::draw(const GasParticlesRef& gas, const GasDrawParams& 
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, hashCounts_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 13, splats_);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 14, cmd_[slot]);
+    // Last frame's fill area becomes this frame's reference; this frame's sum starts at zero.
+    const GLuint areaBuf = areaBuf_[gas.law == 1 ? 1 : 0];
+    glCopyNamedBufferSubData(areaBuf, areaBuf, 0, sizeof(GLuint), sizeof(GLuint));
+    glClearNamedBufferSubData(areaBuf, GL_R32UI, 0, sizeof(GLuint), GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 16, areaBuf);
     // The finest density cell holds about a dozen particles in the core of the intact star.
     const float cell0 = std::max(gas.starRadius, 1e-6f) / 64.0f;
     mark();   // 2 clears and bindings
@@ -293,9 +305,12 @@ void GasParticleRenderer::draw(const GasParticlesRef& gas, const GasDrawParams& 
     splatProg_.set("uGasBrightness", view.brightness);
     splatProg_.set("uGasOpacity", view.opacity);
     splatProg_.set("uRefLen", gas.refLen);
+    splatProg_.set("uGasLaw", gas.law);
+    splatProg_.set("uLawCentre", gas.centre);
     splatProg_.set("uDiskFade", glm::vec3(view.diskOuter, view.diskSlab, view.diskPresence));
     splatProg_.set("uMaxSplats", static_cast<unsigned>(splatCap_));
     splatProg_.set("uMaxExtent", 0.25f * static_cast<float>(h));
+    splatProg_.set("uAreaBudget", 4.0f * static_cast<float>(w) * static_cast<float>(h));
     splatProg_.set("uLens", 0);
     splatProg_.set("uBlackbodyLut", 1);
     glBindTextureUnit(0, lensTex_);
@@ -320,7 +335,7 @@ void GasParticleRenderer::draw(const GasParticlesRef& gas, const GasDrawParams& 
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, cmd_[slot]);
     glDrawArraysIndirect(GL_TRIANGLE_STRIP, nullptr);
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
-    cmdFence_[slot] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (gas.wantStats) cmdFence_[slot] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     mark();   // 6 splat drawing
 
     glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
@@ -336,7 +351,7 @@ void GasParticleRenderer::draw(const GasParticlesRef& gas, const GasDrawParams& 
     glBlendFunc(GL_ONE, GL_ZERO);
 
     glBindBufferBase(GL_UNIFORM_BUFFER, 3, 0);
-    for (GLuint b : {0u, 1u, 2u, 9u, 10u, 11u, 12u, 13u, 14u}) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, b, 0);
+    for (GLuint b : {0u, 1u, 2u, 9u, 10u, 11u, 12u, 13u, 14u, 16u}) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, b, 0);
     glBindTextureUnit(0, 0);
     glBindTextureUnit(1, 0);
     glBindVertexArray(0);

@@ -21,6 +21,7 @@ void usage() {
         "  --fly NAME               start a flight to a target at launch\n"
         "  --universe backdrop|invented|real  --universe-seed N  --placement sgra|sun  --fov DEG\n"
         "  --tde N  start star-disruption scenario N    --dt S  fixed frame time (captures)\n"
+        "  --grb N  start neutron-star merger scenario N (1-3)\n"
         "  --preset low|medium|high|ultra\n"
         "  --bookmark N             start at bookmark 1-4\n"
         "  --pos x,y,z              camera position (M units); --target x,y,z look-at point\n"
@@ -71,6 +72,7 @@ int main(int argc, char** argv) {
         else if (a == "--universe-seed") o.universeSeed = std::stoll(next());
         else if (a == "--fov") o.fovDeg = std::stod(next());
         else if (a == "--tde") o.tdeScenario = std::stoi(next());
+        else if (a == "--grb") o.grbScenario = std::stoi(next());
         else if (a == "--dt") o.fixedDt = std::stod(next());
         else if (a == "--placement") {
             const std::string p = next();

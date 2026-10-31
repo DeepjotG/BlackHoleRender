@@ -213,24 +213,26 @@ static void debrisDiskExtent(const FrameInput& in, float& inner, float& outer) {
 }
 
 void Renderer::particlePass(const FrameInput& in, const Target& hdr) {
-    if (!in.particles || in.particles->count <= 0) return;
     const Settings& s = *in.settings;
-    GasDrawParams v;
-    v.camPos = glm::vec3(in.camera->position());
-    v.camBasis = in.camera->basis();
-    v.tanHalfFov = std::tan(glm::radians(s.fovDeg) * 0.5f);
-    v.lensing = s.lensing && !in.farMode;
-    v.brightness = gasBrightness(s);
-    v.opacity = s.gasOpacity;
-    v.blackbodyLut = in.blackbodyLut;
-    if (in.debrisDisk) {
-        float dInner = s.diskInner, dOuter = s.diskOuter;
-        debrisDiskExtent(in, dInner, dOuter);
-        v.diskOuter = dOuter;
-        v.diskSlab = 2.5f * s.diskThickness;
-        v.diskPresence = std::clamp(in.diskFade, 0.0f, 1.0f);
+    for (const GasParticlesRef* set : {in.particles, in.particlesB}) {
+        if (!set || set->count <= 0) continue;
+        GasDrawParams v;
+        v.camPos = glm::vec3(in.camera->position());
+        v.camBasis = in.camera->basis();
+        v.tanHalfFov = std::tan(glm::radians(s.fovDeg) * 0.5f);
+        v.lensing = s.lensing && !in.farMode;
+        v.brightness = gasBrightness(s);
+        v.opacity = s.gasOpacity;
+        v.blackbodyLut = in.blackbodyLut;
+        if (in.debrisDisk && set->law == 0) {
+            float dInner = s.diskInner, dOuter = s.diskOuter;
+            debrisDiskExtent(in, dInner, dOuter);
+            v.diskOuter = dOuter;
+            v.diskSlab = 2.5f * s.diskThickness;
+            v.diskPresence = std::clamp(in.diskFade, 0.0f, 1.0f);
+        }
+        gasParticles_.draw(*set, v, hdr.fbo, hdr.w, hdr.h);
     }
-    gasParticles_.draw(*in.particles, v, hdr.fbo, hdr.w, hdr.h);
 }
 
 void Renderer::setTraceUniforms(const FrameInput& in, const Target& dst, const glm::vec2& jitter) {
