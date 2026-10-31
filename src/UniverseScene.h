@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,6 +33,8 @@ struct UniverseTarget {
 
 class UniverseScene {
 public:
+    UniverseScene();
+    ~UniverseScene();
     static constexpr int kTileGrid = 128;      // star tiles per cube-face edge
     static constexpr int kBakeChunkRows = 256; // rows of one cube face baked per frame
 
@@ -87,7 +90,10 @@ private:
     void uploadStars(const glm::dvec3& originGal);
     void projectStars(const glm::dvec3& camGal, float limitingMag);
     void bakeChunk(int step);   // step 0 .. 6 * chunks - 1
-    void buildGalaxyLists(const glm::dvec3& camGal);
+    struct GalaxyLists;   // the sky bake's galaxy lists for one viewpoint (UniverseScene.cpp)
+    std::unique_ptr<GalaxyLists> computeGalaxyLists(const glm::dvec3& camGal, const glm::dmat3& R, float deepSky, int bakeRes) const;
+    void uploadGalaxyLists(const GalaxyLists& lists);
+    void waitListJob();
     void buildTargets(double simSeconds);
     void appendPlanetarySystem(const universe::StarRecord& st, const std::string& starName, double simSeconds,
                                std::vector<BodyDesc>& bodies);
@@ -125,7 +131,9 @@ private:
     ShaderProgram bakeProg_;
     GLuint nearGalBuf_ = 0, spriteBuf_ = 0, spriteTileBuf_ = 0, spriteIndexBuf_ = 0;
     int nearGalCount_ = 0;
-    glm::dvec3 bakeCam_{1e300};
+    std::future<std::unique_ptr<GalaxyLists>> listJob_;   // the next cycle's lists, built on a worker thread
+    glm::dvec3 listCam_{1e300};   // the viewpoint of the newest lists (built or being built)
+    int listGen_ = 0;             // bumped when the galaxies or the mapping change: older lists are dropped
     int bakeRes_ = 512;          // diffuse cubemap face size (BHS_BAKE_RES overrides)
     int bakeStep_ = 1 << 30;     // next chunk to bake; >= bakeSteps() = idle
     int bakeSteps() const { return 6 * std::max(1, bakeRes_ / kBakeChunkRows); }

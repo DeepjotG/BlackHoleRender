@@ -15,6 +15,7 @@
 #include "Capture.h"
 #include "Units.h"
 #include "Log.h"
+#include "Profiler.h"
 
 namespace bhs {
 
@@ -415,6 +416,13 @@ void App::onMouseButton(int button, int action) {
 }
 
 void App::gatherInput(Camera::Input& in) {
+    // Test hook: BHS_AUTOFLY cruises forward as if W were held with turbo on (profiling flights).
+    static const bool autofly = std::getenv("BHS_AUTOFLY") != nullptr;
+    if (autofly) {
+        in.move.z = -1.0f;
+        turbo_ = true;
+        return;
+    }
     if (automated_) return;   // captures must not react to whatever happens on the desktop
     if (ui_.wantsKeyboard()) return;
     auto down = [&](int k) { return glfwGetKey(window_, k) == GLFW_PRESS; };
@@ -440,6 +448,7 @@ void App::gatherInput(Camera::Input& in) {
 }
 
 void App::frame() {
+    Profiler::get().frameBegin();
     glfwPollEvents();
     glfwGetFramebufferSize(window_, &fbW_, &fbH_);
     if (fbW_ == 0 || fbH_ == 0) {
@@ -458,7 +467,10 @@ void App::frame() {
         constexpr double kDiskClockPeriod = 60.0;   // the disk shader's cross-fade period
         diskClock_ = std::fmod(diskClock_ + static_cast<double>(dt) * settings_.diskSpeed * kDiskFlowRate, kDiskClockPeriod);
     }
-    updateWorld(dt, in);
+    {
+        Profiler::Scope ps("world");
+        updateWorld(dt, in);
+    }
 
     reloadTimer_ += dt;
     if (reloadTimer_ > 0.5) {
@@ -584,7 +596,10 @@ void App::frame() {
         fi.diskAnimating = !settings_.paused;
     }
     fi.debugView = debugView_;
-    renderer_.render(fi);
+    {
+        Profiler::Scope ps("render", true);
+        renderer_.render(fi);
+    }
 
     const int cinematicFrame = (opt_.frames == 1) ? 0 : 1;   // one warm-up frame when possible
     if (requestCinematic_ || (!opt_.cinematic.empty() && frameIndex_ == cinematicFrame)) {
@@ -708,6 +723,7 @@ void App::frame() {
         ctx.fetchRequest = &fetchRequest_;
         ctx.uniStars = universe_.starCount();
         ctx.simJulianDate = universe_.julianDate(simSeconds_);
+        Profiler::Scope ps("ui", true);
         ui_.draw(ctx);
         ui_.render();
     } else {
@@ -723,8 +739,11 @@ void App::frame() {
         capture::savePngFromFramebuffer(path, fbW_, fbH_);
     }
 
-    if (bridge_.active()) bridge_.present();
-    else glfwSwapBuffers(window_);
+    {
+        Profiler::Scope ps("present", true);
+        if (bridge_.active()) bridge_.present();
+        else glfwSwapBuffers(window_);
+    }
     ++frameIndex_;
     ++fpsFrames_;
     fpsTimer_ += dt;
@@ -892,6 +911,7 @@ void App::buildBodies() {
     }
     grb_.appendBodies(bodies_, settings_.gasBrightness);
     sn_.appendBodies(bodies_);
+    Profiler::Scope ps("universe");
     universe_.update(camera_.position(), simSeconds_, settings_, bodies_);
 }
 
@@ -1437,6 +1457,7 @@ void App::updateWorld(float dt, const Camera::Input& in) {
     }
     // Camera-relative body positions must match the camera position used for this frame.
     bodiesGpu_ = packBodies(bodies_, camera_.position(), 0.25 * 0.0006, 16);
+    Profiler::Scope ps("uni.prepare", true);
     universe_.prepareRender(camera_.position());
 }
 

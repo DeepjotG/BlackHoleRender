@@ -7,6 +7,7 @@
 #include "Camera.h"
 #include "Capture.h"
 #include "Log.h"
+#include "Profiler.h"
 #include "Settings.h"
 #include "Bodies.h"
 
@@ -678,14 +679,26 @@ void Renderer::render(const FrameInput& in) {
     const bool accumulate = s.accumulate;
     const int cap = accumulate ? (in.diskAnimating ? std::min(s.maxAccumFrames, 6) : s.maxAccumFrames) : 1;
     const int sample = accumulate ? accumCount_ : 0;
-    tracePass(in, trace_, accumulate ? jitterFor(sample) : glm::vec2(0.0f), false);
+    {
+        Profiler::Scope ps("trace", true);
+        tracePass(in, trace_, accumulate ? jitterFor(sample) : glm::vec2(0.0f), false);
+    }
     const Target* hdrInternal = &trace_;
-    if (accumulate) hdrInternal = &accumulatePass(in, trace_, sample, cap);
-    upscalePass(in, *hdrInternal, upscaled_);
-    particlePass(in, upscaled_);
-    bloomPass(in, upscaled_);
-    updateAutoExposure(in, upscaled_);
-    compositePass(in, upscaled_, in.targetFbo, in.windowW, in.windowH);
+    {
+        Profiler::Scope ps("upscale", true);
+        if (accumulate) hdrInternal = &accumulatePass(in, trace_, sample, cap);
+        upscalePass(in, *hdrInternal, upscaled_);
+    }
+    {
+        Profiler::Scope ps("particles", true);
+        particlePass(in, upscaled_);
+    }
+    {
+        Profiler::Scope ps("post", true);
+        bloomPass(in, upscaled_);
+        updateAutoExposure(in, upscaled_);
+        compositePass(in, upscaled_, in.targetFbo, in.windowW, in.windowH);
+    }
 
     endTimer();
     accumCount_ = std::min(accumCount_ + 1, 1 << 20);

@@ -8,10 +8,12 @@
 #include <cstdlib>
 #include <cmath>
 #include <filesystem>
+#include <future>
 #include <random>
 #include <thread>
 
 #include "Log.h"
+#include "Profiler.h"
 #include "Orbits.h"
 #include "Settings.h"
 #include "Units.h"
@@ -20,6 +22,11 @@
 #endif
 
 namespace bhs {
+
+// A distant galaxy drawn into the sky bake as a sprite (universe_bake.comp).
+struct SpriteGpu {
+    glm::vec4 dirCos, axisQ, color, params;
+};
 
 namespace {
 
@@ -39,9 +46,6 @@ struct StarGpuIn {
 struct StarGpuOut {
     glm::vec4 dirFlux;
     glm::vec4 color;
-};
-struct SpriteGpu {
-    glm::vec4 dirCos, axisQ, color, params;
 };
 
 // Linear-sRGB colour of a blackbody, normalised to luminance 1 (same CIE fit as DiskTextures).
@@ -118,7 +122,85 @@ std::string proceduralStarName(const glm::dvec3& p) {
     return buf;
 }
 
+// The bake's sprite tiles (kSpriteGrid per face edge, in cubeDir's face order): their centres, the
+// radii of the cones round them, and for each tile the tiles a sprite no wider than the widest tile can
+// reach from anywhere inside it (their centres within its radius plus twice the widest radius).
+struct SpriteTiles {
+    std::vector<glm::dvec3> centre;
+    std::vector<double> radius;
+    double maxRadius = 0.0;
+    std::vector<std::vector<uint32_t>> neighbours;
+};
+const SpriteTiles& spriteTiles() {
+    static const SpriteTiles tiles = [] {
+        SpriteTiles t;
+        const int T = kSpriteGrid;
+        for (int f = 0; f < 6; ++f)
+            for (int j = 0; j < T; ++j)
+                for (int i = 0; i < T; ++i) {
+                    const double u0 = 2.0 * i / T - 1.0, u1 = 2.0 * (i + 1) / T - 1.0, v0 = 2.0 * j / T - 1.0, v1 = 2.0 * (j + 1) / T - 1.0;
+                    const glm::dvec3 c = cubeDir(f, 0.5 * (u0 + u1), 0.5 * (v0 + v1));
+                    double r = 0.0;
+                    for (const glm::dvec3& corner : {cubeDir(f, u0, v0), cubeDir(f, u1, v0), cubeDir(f, u0, v1), cubeDir(f, u1, v1)})
+                        r = std::max(r, std::acos(std::clamp(glm::dot(c, corner), -1.0, 1.0)));
+                    t.centre.push_back(c);
+                    t.radius.push_back(r);
+                    t.maxRadius = std::max(t.maxRadius, r);
+                }
+        const size_t n = t.centre.size();
+        t.neighbours.resize(n);
+        for (size_t a = 0; a < n; ++a)
+            for (size_t b = 0; b < n; ++b)
+                if (std::acos(std::clamp(glm::dot(t.centre[a], t.centre[b]), -1.0, 1.0)) < t.radius[a] + 2.0 * t.maxRadius + 1e-6)
+                    t.neighbours[a].push_back(static_cast<uint32_t>(b));
+        return t;
+    }();
+    return tiles;
+}
+
+// The sprite tile a direction falls in: the inverse of cubeDir's face parameterisation.
+uint32_t spriteTileOf(const glm::dvec3& d) {
+    const glm::dvec3 a = glm::abs(d);
+    int f;
+    double u, v;
+    if (a.x >= a.y && a.x >= a.z) {
+        f = d.x > 0.0 ? 0 : 1;
+        u = (d.x > 0.0 ? -d.z : d.z) / a.x;
+        v = -d.y / a.x;
+    } else if (a.y >= a.z) {
+        f = d.y > 0.0 ? 2 : 3;
+        u = d.x / a.y;
+        v = (d.y > 0.0 ? d.z : -d.z) / a.y;
+    } else {
+        f = d.z > 0.0 ? 4 : 5;
+        u = (d.z > 0.0 ? d.x : -d.x) / a.z;
+        v = -d.y / a.z;
+    }
+    const int T = kSpriteGrid;
+    const int i = std::clamp(static_cast<int>(std::floor((u + 1.0) * 0.5 * T)), 0, T - 1);
+    const int j = std::clamp(static_cast<int>(std::floor((v + 1.0) * 0.5 * T)), 0, T - 1);
+    return static_cast<uint32_t>((f * T + j) * T + i);
+}
+
 }  // namespace
+
+// The sky bake's galaxy lists for one viewpoint: built on a worker thread (computeGalaxyLists, no GL calls),
+// uploaded when a bake cycle starts (uploadGalaxyLists).
+struct UniverseScene::GalaxyLists {
+    glm::dvec3 cam{0.0};
+    int generation = 0;
+    std::vector<universe::GalaxyGpu> nearGpu;
+    std::vector<SpriteGpu> sprites;
+    std::vector<uint32_t> ranges, indices;
+};
+
+UniverseScene::UniverseScene() = default;
+UniverseScene::~UniverseScene() = default;
+
+void UniverseScene::waitListJob() {
+    if (listJob_.valid()) listJob_.wait();
+    listJob_ = {};
+}
 
 // Invented universe: a deterministic planetary system around a star you are close to. Orbits
 // follow Kepler's third law for the star's mass; each planet's type follows its equilibrium
@@ -363,6 +445,7 @@ bool UniverseScene::init() {
 }
 
 void UniverseScene::shutdown() {
+    waitListJob();
     for (ShaderProgram* p : {&countProg_, &scanProg_, &scatterProg_, &bakeProg_}) p->destroy();
     for (GLuint* b : {&starBuf_, &sortedBuf_, &countBuf_, &offsetBuf_, &nearGalBuf_, &spriteBuf_, &spriteTileBuf_, &spriteIndexBuf_}) {
         if (*b) glDeleteBuffers(1, b);
@@ -375,6 +458,9 @@ void UniverseScene::shutdown() {
 }
 
 bool UniverseScene::configure(int mode, uint32_t seed, int placement, const std::string& assetDir, std::string* error) {
+    waitListJob();   // it reads the galaxies about to be replaced
+    ++listGen_;
+    listCam_ = glm::dvec3(1e300);
     active_ = false;
     mode_ = mode;
     stars_.clear();
@@ -400,8 +486,8 @@ bool UniverseScene::configure(int mode, uint32_t seed, int placement, const std:
     field_.configure(content_, seed);
     massSolar_ = 0.0;              // forces a mapping rebuild on the next update
     lastProjectCam_ = glm::dvec3(1e300);
-    bakeCam_ = glm::dvec3(1e300);
     bakeStep_ = 1 << 30;
+    bakeDirty_ = true;
     galDistAt_ = glm::dvec3(1e300);
     active_ = true;
     char buf[256];
@@ -537,7 +623,10 @@ void UniverseScene::projectStars(const glm::dvec3& camGal, float limitingMag) {
     }
 }
 
-void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
+std::unique_ptr<UniverseScene::GalaxyLists> UniverseScene::computeGalaxyLists(const glm::dvec3& camGal, const glm::dmat3& R,
+                                                                              float deepSky, int bakeRes) const {
+    auto out = std::make_unique<GalaxyLists>();
+    out->cam = camGal;
     // Galaxies that cover more than ~1 degree are ray-marched as volumes: the host plus the 15 largest
     // on the sky, marched front to back so nearer dust dims farther light.
     struct NearGalaxy {
@@ -548,7 +637,7 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
     near.push_back({1e9, glm::length(content_.host.center - camGal) - content_.host.boundingRadiusPc() * units::kParsec, &content_.host});
     std::vector<SpriteGpu> sprites;
     sprites.reserve(content_.galaxies.size());
-    const double texel = 1.5708 / bakeRes_ * 2.0;
+    const double texel = 1.5708 / bakeRes * 2.0;
     for (const universe::GalaxyRecord& gr : content_.galaxies) {
         const universe::GalaxyModel& m = gr.model;
         const glm::dvec3 rel = m.center - camGal;
@@ -560,7 +649,7 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
             continue;
         }
         const glm::dvec3 dirG = rel / d;
-        const glm::dvec3 dirR = glm::normalize(R_ * dirG);
+        const glm::dvec3 dirR = glm::normalize(R * dirG);
         const double rVis = 0.45 * rb;
         double theta = std::atan(rVis / d);
         const double dPc = d / units::kParsec;
@@ -569,13 +658,13 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
         // Deep-sky exposure, like a long-exposure photograph: distant galaxies are brightened (setting,
         // 12x by default) so the sky fills with faint galaxies; 1x where galaxies hand over to the
         // volumetric renderer, so nothing jumps.
-        peak *= 1.0 + (std::max(static_cast<double>(deepSky_), 1.0) - 1.0) * (1.0 - glm::smoothstep(0.004, 0.02, rb / d));
+        peak *= 1.0 + (std::max(static_cast<double>(deepSky), 1.0) - 1.0) * (1.0 - glm::smoothstep(0.004, 0.02, rb / d));
         if (theta < texel) {   // keep tiny galaxies one texel wide, conserving their flux
             peak *= (theta * theta) / (texel * texel);
             theta = texel;
         }
         if (peak < 1e-7) continue;
-        const glm::dvec3 nR = R_ * m.normal;
+        const glm::dvec3 nR = R * m.normal;
         glm::dvec3 major = glm::cross(dirR, nR);
         if (glm::length(major) < 1e-9) major = glm::cross(dirR, std::abs(dirR.y) < 0.9 ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0));
         major = glm::normalize(major);
@@ -600,52 +689,62 @@ void UniverseScene::buildGalaxyLists(const glm::dvec3& camGal) {
         near.resize(kMaxNearGalaxies);   // the dropped ones are still too big for sprites: skip them
     }
     std::sort(near.begin(), near.end(), [](const NearGalaxy& a, const NearGalaxy& b) { return a.key < b.key; });
-    std::vector<universe::GalaxyGpu> nearGpu;
-    for (const NearGalaxy& n : near) nearGpu.push_back(universe::packGalaxyGpu(*n.model, camGal));
-    nearGalCount_ = static_cast<int>(nearGpu.size());
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, nearGalBuf_);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(nearGpu.size() * sizeof(universe::GalaxyGpu)), nearGpu.data(), GL_DYNAMIC_DRAW);
+    for (const NearGalaxy& n : near) out->nearGpu.push_back(universe::packGalaxyGpu(*n.model, camGal));
 
-    // Bin sprites into face tiles by cone overlap.
+    // Bin sprites into face tiles by cone overlap (a sprite goes to every tile whose cone its own touches).
+    // A sprite no wider than the widest tile can only reach the neighbours of the tile its centre is in;
+    // the few wider ones are tested against every tile. Each tile's list keeps the sprites in order.
     const int T = kSpriteGrid, tiles = 6 * T * T;
-    static std::vector<glm::dvec3> tileCenter;
-    static std::vector<double> tileRadius;
-    if (tileCenter.empty()) {
-        for (int f = 0; f < 6; ++f)
-            for (int j = 0; j < T; ++j)
-                for (int i = 0; i < T; ++i) {
-                    const double u0 = 2.0 * i / T - 1.0, u1 = 2.0 * (i + 1) / T - 1.0, v0 = 2.0 * j / T - 1.0, v1 = 2.0 * (j + 1) / T - 1.0;
-                    const glm::dvec3 c = cubeDir(f, 0.5 * (u0 + u1), 0.5 * (v0 + v1));
-                    double r = 0.0;
-                    for (const glm::dvec3& corner : {cubeDir(f, u0, v0), cubeDir(f, u1, v0), cubeDir(f, u0, v1), cubeDir(f, u1, v1)})
-                        r = std::max(r, std::acos(std::clamp(glm::dot(c, corner), -1.0, 1.0)));
-                    tileCenter.push_back(c);
-                    tileRadius.push_back(r);
-                }
-    }
+    const SpriteTiles& st = spriteTiles();
     std::vector<std::vector<uint32_t>> lists(static_cast<size_t>(tiles));
-    for (size_t si = 0; si < sprites.size(); ++si) {
-        const glm::dvec3 d(sprites[si].dirCos);
-        const double th = std::acos(std::clamp(static_cast<double>(sprites[si].dirCos.w), -1.0, 1.0));
-        for (int t = 0; t < tiles; ++t) {
-            const double ang = std::acos(std::clamp(glm::dot(d, tileCenter[static_cast<size_t>(t)]), -1.0, 1.0));
-            if (ang < th + tileRadius[static_cast<size_t>(t)]) lists[static_cast<size_t>(t)].push_back(static_cast<uint32_t>(si));
+    auto bin = [&](bool everyTile) {
+        for (auto& l : lists) l.clear();
+        for (size_t si = 0; si < sprites.size(); ++si) {
+            const glm::dvec3 d(sprites[si].dirCos);
+            const double th = std::acos(std::clamp(static_cast<double>(sprites[si].dirCos.w), -1.0, 1.0));
+            auto test = [&](uint32_t t) {
+                const double ang = std::acos(std::clamp(glm::dot(d, st.centre[t]), -1.0, 1.0));
+                if (ang < th + st.radius[t]) lists[t].push_back(static_cast<uint32_t>(si));
+            };
+            if (!everyTile && th <= st.maxRadius) {
+                for (uint32_t t : st.neighbours[spriteTileOf(d)]) test(t);
+            } else {
+                for (uint32_t t = 0; t < static_cast<uint32_t>(tiles); ++t) test(t);
+            }
         }
+    };
+    // Test hook: BHS_LIST_SELFTEST also bins every sprite against every tile and checks the lists agree.
+    static const bool selfTest = std::getenv("BHS_LIST_SELFTEST") != nullptr;
+    if (selfTest) {
+        bin(true);
+        const std::vector<std::vector<uint32_t>> full = lists;
+        bin(false);
+        logInfo("sky bake lists self-test: {} sprites, neighbour binning {} the full scan", sprites.size(), lists == full ? "matches" : "DIFFERS FROM");
+    } else {
+        bin(false);
     }
-    std::vector<uint32_t> ranges(static_cast<size_t>(tiles) * 2), indices;
+    out->ranges.resize(static_cast<size_t>(tiles) * 2);
     for (int t = 0; t < tiles; ++t) {
-        ranges[static_cast<size_t>(t) * 2] = static_cast<uint32_t>(indices.size());
-        ranges[static_cast<size_t>(t) * 2 + 1] = static_cast<uint32_t>(lists[static_cast<size_t>(t)].size());
-        indices.insert(indices.end(), lists[static_cast<size_t>(t)].begin(), lists[static_cast<size_t>(t)].end());
+        out->ranges[static_cast<size_t>(t) * 2] = static_cast<uint32_t>(out->indices.size());
+        out->ranges[static_cast<size_t>(t) * 2 + 1] = static_cast<uint32_t>(lists[static_cast<size_t>(t)].size());
+        out->indices.insert(out->indices.end(), lists[static_cast<size_t>(t)].begin(), lists[static_cast<size_t>(t)].end());
     }
     if (sprites.empty()) sprites.push_back(SpriteGpu{});
-    if (indices.empty()) indices.push_back(0);
+    if (out->indices.empty()) out->indices.push_back(0);
+    out->sprites = std::move(sprites);
+    return out;
+}
+
+void UniverseScene::uploadGalaxyLists(const GalaxyLists& l) {
+    nearGalCount_ = static_cast<int>(l.nearGpu.size());
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, nearGalBuf_);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(l.nearGpu.size() * sizeof(universe::GalaxyGpu)), l.nearGpu.data(), GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, spriteBuf_);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(sprites.size() * sizeof(SpriteGpu)), sprites.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(l.sprites.size() * sizeof(SpriteGpu)), l.sprites.data(), GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, spriteTileBuf_);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(ranges.size() * 4), ranges.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(l.ranges.size() * 4), l.ranges.data(), GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, spriteIndexBuf_);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(indices.size() * 4), indices.data(), GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(l.indices.size() * 4), l.indices.data(), GL_DYNAMIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 }
 
@@ -777,6 +876,7 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
     }
 
     // ---- stars: explicit + procedural (+ the black hole itself as a point of light from afar)
+    Profiler::Scope psGather("stars.gather");
     const double t0 = glfwGetTime();
     bool changed = field_.gather(camGal, kLimitingMag, kMaxProcStars, proc_) || remap || stars_.empty();
     const bool farFromHole = glm::length(camPosM) > 2e4;
@@ -808,6 +908,7 @@ void UniverseScene::update(const glm::dvec3& camPosM, double simSeconds, const S
     // set changed or the camera moved a tenth of the way to the eighth one, otherwise the cached
     // candidates are re-sorted (with 16 candidates kept, the eight nearest stay among them).
     if (changed || nearIdx_.empty() || glm::length(camGal - nearAt_) > 0.1 * nearReach_) {
+        Profiler::Scope psNear("stars.nearest");
         Near cand[16];
         int nc = 0;
         for (size_t i = 0; i < stars_.size(); ++i) {
@@ -935,8 +1036,12 @@ void UniverseScene::prepareRender(const glm::dvec3& camPosM) {
     remapped_ = false;
     // Stars: re-centre the single-precision upload near the camera, then project and bin.
     const bool recentre = glm::length(camGal - starOrigin_) > 50.0 * units::kParsec;
-    if (starsChanged_ || recentre) uploadStars(camGal);
+    if (starsChanged_ || recentre) {
+        Profiler::Scope ps("stars.upload", true);
+        uploadStars(camGal);
+    }
     if (starsChanged_ || recentre || remap || camGal != lastProjectCam_) {
+        Profiler::Scope ps("stars.project", true);
         projectStars(camGal, kLimitingMag);
         lastProjectCam_ = camGal;
     }
@@ -949,17 +1054,41 @@ void UniverseScene::prepareRender(const glm::dvec3& camPosM) {
     // ---- sky bake from the viewpoint, one strip of a face per frame while stale
     refreshGalaxyDistances(camGal);
     const double dGal = galCentreM_;
-    // A full cycle (every strip of the six faces) always completes with the viewpoint and galaxy lists
-    // captured at its start; if the camera moved meanwhile, another cycle follows.
+    // A full cycle (every strip of the six faces) always completes with the galaxy lists it started with.
+    // The lists for a new viewpoint (a scan of every galaxy, far too slow for a frame) are built on a
+    // worker thread as soon as the view is stale, while the current cycle goes on; the next cycle starts
+    // with them once both are done. Lists built for an older mapping (another black hole mass) are dropped.
     const double thr = std::max(0.5 * units::kParsec, 0.004 * dGal);
-    if (glm::length(camGal - bakeCam_) > thr || remap) bakeDirty_ = true;
-    if (bakeStep_ >= bakeSteps() && bakeDirty_) bakeStep_ = 0;
-    if (bakeStep_ == 0) {
-        bakeCam_ = camGal;
-        buildGalaxyLists(camGal);
+    if (remap) ++listGen_;
+    if (glm::length(camGal - listCam_) > thr || remap) bakeDirty_ = true;
+    if (bakeDirty_ && !listJob_.valid()) {
         bakeDirty_ = false;
+        listCam_ = camGal;
+        listJob_ = std::async(std::launch::async, [this, camGal, R = R_, deepSky = deepSky_, res = bakeRes_, gen = listGen_] {
+            static const bool debugBake = std::getenv("BHS_DEBUG_BAKE") != nullptr;
+            const auto t0 = std::chrono::steady_clock::now();
+            std::unique_ptr<GalaxyLists> l = computeGalaxyLists(camGal, R, deepSky, res);
+            l->generation = gen;
+            if (debugBake)
+                logInfo("sky bake lists: {} sprites, {} near galaxies in {:.1f} ms (worker thread)", l->sprites.size(), l->nearGpu.size(),
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            return l;
+        });
     }
-    if (bakeStep_ < bakeSteps()) bakeChunk(bakeStep_++);
+    if (bakeStep_ >= bakeSteps() && listJob_.valid() && listJob_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        Profiler::Scope ps("bake.lists");
+        std::unique_ptr<GalaxyLists> lists = listJob_.get();
+        if (lists->generation == listGen_) {
+            uploadGalaxyLists(*lists);
+            bakeStep_ = 0;
+        } else {
+            bakeDirty_ = true;
+        }
+    }
+    if (bakeStep_ < bakeSteps()) {
+        Profiler::Scope ps("bake.chunk", true);
+        bakeChunk(bakeStep_++);
+    }
 }
 
 }  // namespace bhs
